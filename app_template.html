@@ -885,7 +885,12 @@ document.addEventListener('click', e => {
         const r = recipeOf(id);
         if(!r) return;
         for(const [mid] of r.m){
-          if(canCraft(mid)){ craftSet.add(mid); walk(mid, depth+1, seen); }
+          // 분해는 제외한다. 상위 재료를 사서 쪼개는 쪽이라 '직접 제작' 과 방향이 반대고,
+          // 동물 잔해처럼 분해 레시피가 있는 재료를 전부 켜면 우수한 그림자 발톱(T7) 을
+          // 사서 세 번 내리는 식의 원가가 나온다. 개별 행의 '분해' 버튼으로는 여전히 켤 수 있다.
+          if(canCraft(mid) && !convertsDown(mid, recipeOf(mid))){
+            craftSet.add(mid); walk(mid, depth+1, seen);
+          }
         }
         seen.delete(id);
       };

@@ -39,12 +39,19 @@ def parse_reqs(node, uniquename):
                 m.append(1)
             mats.append(m)
         if not mats: continue
-        out.append({
+        one = {
             'f': float(req.get('@craftingfocus', 0) or 0),
             'a': float(req.get('@amountcrafted', 1) or 1),
             's': float(req.get('@silver', 0) or 0),
             'm': mats,
-        })
+        }
+        # 게임이 제작 버튼 라벨로 행동 종류를 구분해 준다.
+        # REFINE(정제) / TRANSMUTE(변환) / COMBINE(조합) / RITUAL(의식) / BUY(구입).
+        # 자원의 인챈트 단계·티어를 올리는 건 전부 TRANSMUTE 라, 재료 트리에서
+        # '어디서 .0 이 .1 로 올라가는지' 를 이 값으로 표시한다.
+        ov = req.get('@craftbuttonlocaoverride') or ''
+        if ov: one['b'] = ov.rsplit('_', 1)[-1].lower()
+        out.append(one)
     return out
 
 def parse_upgrade(node, uniquename, ench):

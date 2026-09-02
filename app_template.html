@@ -603,10 +603,17 @@ function craftKind(id){
   if(!r) return null;
   if(r.up) return 'ench';
   if(convertsDown(id, r)) return 'convert';
+  // 게임이 알려주는 행동 종류 (transmute=변환, refine=정제, combine=조합, ritual=의식).
+  // 자원의 .0 -> .1 -> .2 는 전부 transmute 라, 인챈트 단계가 어디서 오르는지 여기서 드러난다.
+  if(r.b === 'transmute') return 'transmute';
+  if(r.b === 'combine')   return 'combine';
+  if(r.b === 'ritual')    return 'ritual';
   return 'craft';
 }
-const CRAFT_KIND_LABEL = { ench:'인챈트', convert:'분해', craft:'직접제작' };
-const CRAFT_KIND_BTN   = { ench:'인챈트', convert:'분해', craft:'제작' };
+const CRAFT_KIND_LABEL = { ench:'인챈트', convert:'분해', transmute:'변환',
+                           combine:'조합', ritual:'의식', craft:'직접제작' };
+const CRAFT_KIND_BTN   = { ench:'인챈트', convert:'분해', transmute:'변환',
+                           combine:'조합', ritual:'의식', craft:'제작' };
 
 function treeRows(id, depth, qtyPer, seen, rows){
   const craft = willCraft(id, depth) && !seen.has(id);
@@ -629,8 +636,13 @@ function treeRows(id, depth, qtyPer, seen, rows){
 }
 
 function priceCell(id, crafting, unitCostVal){
-  if(crafting) return `<span class="mut">${fmt(unitCostVal)}</span> <span class="tag craft">${
-    CRAFT_KIND_LABEL[craftKind(id)] || '직접제작'}</span>`;
+  if(crafting){
+    const k = craftKind(id), r = recipeOf(id);
+    // 변환은 재료값보다 은화 수수료가 본체라 금액을 같이 적어 준다
+    const silver = k === 'transmute' && r && r.s ? ` <span class="tag">은화 ${fmt(r.s / r.a)}</span>` : '';
+    return `<span class="mut">${fmt(unitCostVal)}</span> <span class="tag craft">${
+      CRAFT_KIND_LABEL[k] || '직접제작'}</span>${silver}`;
+  }
   const bp = buyPrice(id);
   if(bp.src === 'manual')
     return `${fmt(bp.v)} <span class="tag">수동</span>`;
@@ -808,10 +820,14 @@ function renderResult(){
     명시한 것으로, 아티팩트·토큰·연금 희귀 재료 등이 해당합니다.<br>
     <b>분해</b> · 상위 티어를 하위로 쪼개는 레시피입니다. 집중을 쓰지 않으며,
     반환 여부는 위와 같이 게임 데이터를 따릅니다.<br>
-    <b>인챈트</b> · 인챈트 단계(.1~.4)가 있는 장비·포션은 기본적으로 인챈트된 재료(2단계 주괴·판자 등)로
-    처음부터 직접 제작하는 레시피가 선택돼 있습니다. "레시피 선택"에서 바로 아래 단계 완제품 +
-    룬/영혼/유물(포션은 연금 추출물)로 업그레이드하는 인챈트 레시피로 바꿀 수 있습니다.
-    이 경로는 집중·제작소 사용료·자원 반환이 전혀 적용되지 않는 별도 공정입니다.<br>
+    <b>인챈트 만드는 두 가지 길</b><br>
+    ① <b>재료를 올려서 제작</b>(기본) — 게임 원본 레시피 그대로 주재료만 인챈트 단계가 올라가고
+    아티팩트 재료(스크롤·송곳니 등)는 .0 이 그대로 들어갑니다. 여기서 "하위 재료 전부 직접 제작"을
+    누르면 <b>변환</b> 단계까지 펼쳐져, 일반 자원을 사서 <b>은화를 내고 .0 → .1 → .2 로 직접 올리는</b>
+    원가가 계산됩니다. 자원의 인챈트 단계를 올리는 건 룬이 아니라 이 은화 변환입니다.<br>
+    ② <b>완성품 + 룬 인챈트</b> — "레시피 선택"에서 고르면, 아래 단계 완제품을 사와서 룬/영혼/유물
+    (음식은 피시 소스, 물약은 연금 추출물)로 한 단계만 올립니다. 집중·제작소 사용료·자원 반환이
+    전혀 적용되지 않는 별도 공정입니다.<br>
     <b>제작소 사용료</b> · 아이템 가치 × 0.1125 × (사용료 ÷ 100). 아이템 가치는 게임 데이터의
     itemvalue, 없으면 재료 가치 합에서 유도합니다.<br>
     <b>세금</b> · 판매세 ${cfg.premium?'4% (프리미엄)':'8% (비프리미엄)'}${

@@ -47,6 +47,21 @@ def parse_reqs(node, uniquename):
         })
     return out
 
+def parse_upgrade(node, uniquename, ench):
+    """upgraderequirements -> 인챈트(업그레이드) 대체 레시피.
+    바로 아래 단계 아이템 1개 + 룬/영혼/유물(또는 연금 추출물 등 업그레이드 재료)만 있으면 되는
+    경로로, 완제품을 재료부터 다시 만드는 'craftingrequirements' 경로와는 별개의 대체 레시피다.
+    집중·제작소 사용료가 들지 않고(f=0), 자원 반환도 적용되지 않는다(인챈트/업그레이드는
+    도시·특화·집중 보너스의 대상이 아니므로 두 재료 모두 반환없음(nr) 처리)."""
+    if not node or ench <= 0: return None
+    mats = [[mid(uniquename, ench - 1), 1.0, 1]]
+    for r in as_list(node.get('upgraderesource')):
+        u = r.get('@uniquename')
+        if not u: continue
+        mats.append([u, float(r.get('@count', 1)), 1])
+    if len(mats) < 2: return None
+    return {'f': 0.0, 'a': 1.0, 's': 0.0, 'm': mats, 'up': 1}
+
 # ---- 1차 수집 --------------------------------------------------------------
 items = {}   # marketId -> record
 
@@ -73,6 +88,10 @@ def add(uniquename, ench, kind, base, node_over=None):
     fame = base.get('@famevalue')
     if fame: rec['fv'] = float(fame)
     r = parse_reqs(src.get('craftingrequirements'), uniquename)
+    # 인챈트 단계(node_over가 있을 때)엔 룬/영혼/유물로 한 단계 올리는 대체 레시피가 더 있을 수 있다
+    if node_over is not None:
+        up = parse_upgrade(node_over.get('upgraderequirements'), uniquename, int(ench or 0))
+        if up: r = r + [up]
     if r: rec['r'] = r
     items[i] = rec
 
@@ -100,6 +119,9 @@ def item_value(i, depth=0):
     _cache[i] = 0.0  # 순환 방지
     best = 0.0
     for r in rec.get('r', []):
+        # 인챈트(업그레이드) 경로는 '아래 단계 완제품 + 룬 288개' 라 재료 합이 실제 아이템
+        # 가치보다 훨씬 크다. 여기서 유도값으로 쓰면 제작 수수료가 부풀려지므로 제외한다.
+        if r.get('up'): continue
         tot = sum(item_value(m[0], depth + 1) * m[1] for m in r['m'])
         v = tot / (r['a'] or 1)
         best = max(best, v)

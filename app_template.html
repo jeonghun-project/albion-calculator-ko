@@ -414,7 +414,10 @@ function unitCost(id, depth, stack, out){
                 buy: sub.buy, depth: depth + 1 });
   }
   stack.delete(id);
-  const myFee   = 0.1125 * (rec.iv || 0) * (cfg.fee / 100);
+  // 인챈트(업그레이드) 경로는 게임 데이터의 upgraderequirements 에 재료만 있고
+  // craftingrequirements 와 달리 time·silver·craftingfocus 가 아예 없다.
+  // 제작소 사용료는 제작 시간(영양 소모)에 걸리는 값이므로 이 경로엔 붙이지 않는다.
+  const myFee   = r.up ? 0 : 0.1125 * (rec.iv || 0) * (cfg.fee / 100);
   const myFocus = (r.f / r.a) * focusMult();
   const silver  = (r.s || 0) / r.a;
   out.push({ id, depth, recipe: r, kids, mats, fee: myFee, focus: myFocus });
@@ -594,6 +597,17 @@ function cfgPanel(rec){
 }
 
 /* ══ 재료 트리 ══════════════════════════════════════════════════ */
+/* 지금 고른 레시피가 어떤 종류인지: 인챈트(룬/영혼/유물 업그레이드) · 분해 · 직접 제작 */
+function craftKind(id){
+  const r = recipeOf(id);
+  if(!r) return null;
+  if(r.up) return 'ench';
+  if(convertsDown(id, r)) return 'convert';
+  return 'craft';
+}
+const CRAFT_KIND_LABEL = { ench:'인챈트', convert:'분해', craft:'직접제작' };
+const CRAFT_KIND_BTN   = { ench:'인챈트', convert:'분해', craft:'제작' };
+
 function treeRows(id, depth, qtyPer, seen, rows){
   const craft = willCraft(id, depth) && !seen.has(id);
   const rec = IX.get(id);
@@ -606,8 +620,7 @@ function treeRows(id, depth, qtyPer, seen, rows){
       const need = per * (noReturn(mid, nr) ? 1 : mult);
       const sub  = willCraft(mid, depth + 1) && !seen.has(mid);
       rows.push({ id: mid, depth, per, need, craftable: canCraft(mid), crafting: sub,
-                  noret: noReturn(mid, nr),
-                  convert: convertsDown(mid, recipeOf(mid)) });
+                  noret: noReturn(mid, nr), kind: craftKind(mid) });
       if(sub) treeRows(mid, depth + 1, need, seen, rows);
     }
     seen.delete(id);
@@ -617,7 +630,7 @@ function treeRows(id, depth, qtyPer, seen, rows){
 
 function priceCell(id, crafting, unitCostVal){
   if(crafting) return `<span class="mut">${fmt(unitCostVal)}</span> <span class="tag craft">${
-    convertsDown(id, recipeOf(id)) ? '분해' : '직접제작'}</span>`;
+    CRAFT_KIND_LABEL[craftKind(id)] || '직접제작'}</span>`;
   const bp = buyPrice(id);
   if(bp.src === 'manual')
     return `${fmt(bp.v)} <span class="tag">수동</span>`;
@@ -668,8 +681,11 @@ function renderResult(){
       <div class="badges">
         <span class="badge">${tierLabel(rec)}</span>
         ${bc ? `<span class="badge">보너스 도시 ${CITY_KO[bc]}</span>` : ''}
-        <span class="badge">반환율 ${pct(c.rr)} (보너스 합 ${fmt1(c.b*100)}%)</span>
-        ${convertsDown(sel, recipeOf(sel)) ? `<span class="badge">분해</span>` : ''}
+        ${craftKind(sel) === 'ench'
+          ? `<span class="badge">자원 반환 없음</span>`
+          : `<span class="badge">반환율 ${pct(c.rr)} (보너스 합 ${fmt1(c.b*100)}%)</span>`}
+        ${craftKind(sel) === 'convert' ? `<span class="badge">분해</span>` : ''}
+        ${craftKind(sel) === 'ench' ? `<span class="badge">인챈트</span>` : ''}
         <span class="badge">1회 ${fmtQ(recipeOf(sel).a)}개 산출</span>
         ${recs.length > 1 ? `<span class="badge">레시피 ${recs.length}종</span>` : ''}
       </div>
@@ -680,6 +696,7 @@ function renderResult(){
     <h3 style="margin-bottom:6px">레시피 선택</h3>
     ${recs.map((r,i) => `<button class="mini ${(recipePick.get(sel)??0)===i?'on':''}"
         data-recipe="${i}" style="margin:2px 4px 2px 0">${
+        r.up ? '<span class="tag" style="margin:0 5px 0 0">인챈트</span>' : ''}${
         r.m.map(([m,ct]) => `${esc(nameOf(m))}×${fmtQ(ct)}`).join(' + ')}</button>`).join('')}
   </div>` : ''}
 
@@ -718,7 +735,8 @@ function renderResult(){
   </div>
 
   <div class="sec">재료 내역 <span class="mut" style="font-weight:400;letter-spacing:0">
-    완제품 1개 기준 · 반환율 ${pct(c.rr)} 적용</span></div>
+    완제품 1개 기준 · ${craftKind(sel) === 'ench'
+      ? '인챈트 경로 — 자원 반환 없음' : `반환율 ${pct(c.rr)} 적용`}</span></div>
   <div style="display:flex;gap:6px;margin-bottom:6px">
     <button class="mini" data-bulk="craft">하위 재료 전부 직접 제작</button>
     <button class="mini" data-bulk="buy">전부 시장에서 구매</button>
@@ -746,8 +764,7 @@ function renderResult(){
         <td>${isFinite(u) ? fmt(u * r.need * c.qty) : '—'}</td>
         <td style="text-align:center">${r.craftable
           ? `<button class="mini ${r.crafting?'on':''}" data-craft="${esc(r.id)}">${
-              r.convert ? (r.crafting ? '분해 중' : '분해')
-                        : (r.crafting ? '제작 중' : '제작')}</button>`
+              (CRAFT_KIND_BTN[r.kind] || '제작') + (r.crafting ? ' 중' : '')}</button>`
           : '<span class="mut">—</span>'}</td>
       </tr>`;
     }).join('')}
@@ -791,6 +808,10 @@ function renderResult(){
     명시한 것으로, 아티팩트·토큰·연금 희귀 재료 등이 해당합니다.<br>
     <b>분해</b> · 상위 티어를 하위로 쪼개는 레시피입니다. 집중을 쓰지 않으며,
     반환 여부는 위와 같이 게임 데이터를 따릅니다.<br>
+    <b>인챈트</b> · 인챈트 단계(.1~.4)가 있는 장비·포션은 기본적으로 인챈트된 재료(2단계 주괴·판자 등)로
+    처음부터 직접 제작하는 레시피가 선택돼 있습니다. "레시피 선택"에서 바로 아래 단계 완제품 +
+    룬/영혼/유물(포션은 연금 추출물)로 업그레이드하는 인챈트 레시피로 바꿀 수 있습니다.
+    이 경로는 집중·제작소 사용료·자원 반환이 전혀 적용되지 않는 별도 공정입니다.<br>
     <b>제작소 사용료</b> · 아이템 가치 × 0.1125 × (사용료 ÷ 100). 아이템 가치는 게임 데이터의
     itemvalue, 없으면 재료 가치 합에서 유도합니다.<br>
     <b>세금</b> · 판매세 ${cfg.premium?'4% (프리미엄)':'8% (비프리미엄)'}${

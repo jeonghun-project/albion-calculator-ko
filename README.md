@@ -36,11 +36,15 @@ python3 build_data.py && python3 build_app.py
 * `build_app.py` — `app_template.html` 에 데이터를 넣어 완성본 HTML 빌드
 * 반환율·세금 수치는 `app_template.html` 상단 `bonusSum()` / `salesTax()` 에 있습니다
 
-## 웹에 올리려면
+## 배포
 
-정적 호스팅(GitHub Pages, Vercel, Netlify, S3) 어디든 파일만 올리면 그대로 동작합니다.
-단 시세 API 를 브라우저에서 직접 호출하므로, 외부 네트워크 요청을 막는 샌드박스
-환경에서는 시세가 비어 보일 수 있습니다.
+`main` 브랜치 루트를 GitHub Pages 가 그대로 서빙합니다. 푸시하면 1~2분 뒤 반영됩니다.
+
+    https://jeonghun-project.github.io/albion-calculator-ko/
+
+시세 API 는 `Access-Control-Allow-Origin: *` 라 브라우저에서 직접 호출합니다 —
+서버나 프록시가 필요 없어 정적 호스팅(Pages, Netlify, S3) 어디서든 동작합니다.
+외부 네트워크 요청을 막는 샌드박스 환경에서만 시세가 비어 보입니다.
 
 ## 출처
 

@@ -496,6 +496,37 @@ async function fetchPrices(){
 const setStatus = t => document.getElementById('status').textContent = t;
 
 /* ══ 사이드바 ═══════════════════════════════════════════════════ */
+/* 계열 이름으로도 찾을 수 있게 하는 한글 별칭.
+   게임 한글 이름에는 계열 이름이 들어가지 않는다 — 셰이프시프터 계열의 한글 이름은
+   '프라울링 스태프' · '라이트콜러' 라서 '셰이프시프터' 로는 한 종도 안 걸렸다. */
+const CAT_ALIAS = {
+  sword:'검 한손검 양손검 브로드소드 클레이모어 소드',
+  axe:'도끼 액스 배틀액스 할버드', mace:'메이스 둔기 철퇴',
+  hammer:'해머 망치', spear:'창 스피어 파이크 글레이브',
+  dagger:'단검 대거 나이프 클로', quarterstaff:'쿼터스태프 봉 스태프',
+  knuckles:'너클 난투 장갑 건틀릿', bow:'활 보우 롱보우',
+  crossbow:'석궁 크로스보우', firestaff:'파이어 화염 불 스태프',
+  froststaff:'프로스트 냉기 얼음 스태프', arcanestaff:'아케인 비전 스태프',
+  holystaff:'홀리 신성 힐 힐러 스태프', naturestaff:'네이쳐 네이처 자연 스태프',
+  cursestaff:'커스드 커스 저주 스태프',
+  shapeshifterstaff:'셰이프시프터 쉐이프시프터 셰입시프터 변신 변신술사 스태프',
+  offhand:'보조 오프핸드 방패 실드 서적 토치 횃불 성물',
+  plate_armor:'판금 플레이트 갑옷 방어구', plate_helmet:'판금 플레이트 투구 헬멧',
+  plate_shoes:'판금 플레이트 신발 부츠', leather_armor:'가죽 레더 재킷 갑옷',
+  leather_helmet:'가죽 레더 후드 투구', leather_shoes:'가죽 레더 신발 부츠',
+  cloth_armor:'천 클로스 로브 갑옷', cloth_helmet:'천 클로스 두건 모자 투구',
+  cloth_shoes:'천 클로스 샌들 신발', bag:'가방 백팩', cape:'망토 케이프',
+  tools:'도구 채집 곡괭이 낫 손도끼', gatherergear:'채집 채집복 채집장비 의상',
+  food:'음식 요리 식량', potion:'물약 포션',
+  ore:'광석 주괴 광물', wood:'원목 판자 나무 목재', hide:'가죽 피혁',
+  fiber:'섬유 직물 삼', rock:'돌 석재 석괴 바위',
+};
+/* 검색 대상 문자열 — 처음 쓸 때 한 번 만들어 레코드에 붙여 둔다 */
+function searchText(r){
+  return r._s || (r._s = [r.ko, r.en, r.id, r.cc, r.s1, r.s2, CAT_ALIAS[r.cc]]
+    .filter(Boolean).join(' ').toLowerCase());
+}
+
 function matches(r){
   if(!r.r) return false;
   // 검색어가 있으면 카테고리 탭 제한을 풀어 전체에서 찾는다
@@ -505,12 +536,7 @@ function matches(r){
   }
   if(tierF && r.t !== tierF) return false;
   if(enchF >= 0 && (r.e || 0) !== enchF) return false;
-  if(query){
-    const q = query.toLowerCase();
-    if(!(r.ko || '').toLowerCase().includes(q) &&
-       !(r.en || '').toLowerCase().includes(q) &&
-       !r.id.toLowerCase().includes(q)) return false;
-  }
+  if(query && !searchText(r).includes(query.toLowerCase())) return false;
   return true;
 }
 function renderSidebar(){

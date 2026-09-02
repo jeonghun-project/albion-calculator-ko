@@ -236,13 +236,23 @@ const CRAFT_CITY = {
 const isRefineCat = cc => cc in REFINE_CITY;
 const bonusCityOf = r => REFINE_CITY[r.cc] || CRAFT_CITY[r.cc] || null;
 
-/* 분해·전환 레시피: 재료 1종을 넣어 여러 개로 쪼개는 고정 변환 (집중을 쓰지 않는다)
-   상위 티어 연금 재료 분해, 물고기 손질 등. 고정 변환이라 자원 반환이 붙지 않는다. */
-const isConvert = r => !!r && r.m.length === 1 && r.a > 1 && r.f === 0;
+/* 분해: 상위 티어를 하위로 쪼개는 레시피 (연금 재료 분해 등). 표기 구분용 */
+const isConvert = r => {
+  if(!r || r.m.length !== 1 || r.a <= 1 || r.f !== 0) return false;
+  const src = IX.get(r.m[0][0]);
+  return !!src && (src.t || 0) > 0;
+};
+const convertsDown = (id, r) => {
+  if(!isConvert(r)) return false;
+  const out = IX.get(id), src = IX.get(r.m[0][0]);
+  return !!out && !!src && (src.t || 0) > (out.t || 0);
+};
 
-/* 자원 반환이 적용되지 않는 재료 (아티팩트 · 토큰 · 퀘스트템) */
-const noReturn = id => id.includes('ARTEFACT') || id.includes('TOKEN') ||
-                       id.startsWith('QUESTITEM');
+/* 자원 반환 여부는 게임 데이터가 직접 알려준다.
+   레시피 재료의 maxreturnamount=0 이면 그 재료는 반환되지 않는다(빌드 시 세 번째 원소로 표시).
+   데이터에 표시가 빠진 극소수는 이름으로 보완한다. */
+const noReturn = (id, flag) => !!flag || id.includes('ARTEFACT') ||
+                       id.includes('TOKEN') || id.startsWith('QUESTITEM');
 
 /* ── 카테고리 탭 ──────────────────────────────────────────────── */
 const TABS = [
@@ -389,12 +399,12 @@ function unitCost(id, depth, stack, out){
   }
   const r = recipeOf(id);
   stack.add(id);
-  const mult = isConvert(r) ? 1 : matMult(rec);
+  const mult = matMult(rec);
   let mats = 0, focus = 0, fame = 0, fee = 0;
   const kids = [];
-  for(const [mid, cnt] of r.m){
+  for(const [mid, cnt, nr] of r.m){
     const per  = cnt / r.a;                                  // 완제품 1개당 기본 소모
-    const need = per * (noReturn(mid) ? 1 : mult);           // 반환 적용 후 실소모
+    const need = per * (noReturn(mid, nr) ? 1 : mult);       // 반환 적용 후 실소모
     const sub  = unitCost(mid, depth + 1, stack, out);
     mats  += sub.cost * need;
     focus += sub.focus * need;
@@ -589,14 +599,15 @@ function treeRows(id, depth, qtyPer, seen, rows){
   const rec = IX.get(id);
   if(craft){
     const r = recipeOf(id);
-    const mult = isConvert(r) ? 1 : matMult(rec);
+    const mult = matMult(rec);
     seen.add(id);
-    for(const [mid, cnt] of r.m){
+    for(const [mid, cnt, nr] of r.m){
       const per  = (cnt / r.a) * qtyPer;
-      const need = per * (noReturn(mid) ? 1 : mult);
+      const need = per * (noReturn(mid, nr) ? 1 : mult);
       const sub  = willCraft(mid, depth + 1) && !seen.has(mid);
       rows.push({ id: mid, depth, per, need, craftable: canCraft(mid), crafting: sub,
-                  convert: isConvert(recipeOf(mid)) });
+                  noret: noReturn(mid, nr),
+                  convert: convertsDown(mid, recipeOf(mid)) });
       if(sub) treeRows(mid, depth + 1, need, seen, rows);
     }
     seen.delete(id);
@@ -606,7 +617,7 @@ function treeRows(id, depth, qtyPer, seen, rows){
 
 function priceCell(id, crafting, unitCostVal){
   if(crafting) return `<span class="mut">${fmt(unitCostVal)}</span> <span class="tag craft">${
-    isConvert(recipeOf(id)) ? '분해' : '직접제작'}</span>`;
+    convertsDown(id, recipeOf(id)) ? '분해' : '직접제작'}</span>`;
   const bp = buyPrice(id);
   if(bp.src === 'manual')
     return `${fmt(bp.v)} <span class="tag">수동</span>`;
@@ -657,9 +668,8 @@ function renderResult(){
       <div class="badges">
         <span class="badge">${tierLabel(rec)}</span>
         ${bc ? `<span class="badge">보너스 도시 ${CITY_KO[bc]}</span>` : ''}
-        ${isConvert(recipeOf(sel))
-          ? `<span class="badge">분해 — 자원 반환 없음</span>`
-          : `<span class="badge">반환율 ${pct(c.rr)} (보너스 합 ${fmt1(c.b*100)}%)</span>`}
+        <span class="badge">반환율 ${pct(c.rr)} (보너스 합 ${fmt1(c.b*100)}%)</span>
+        ${convertsDown(sel, recipeOf(sel)) ? `<span class="badge">분해</span>` : ''}
         <span class="badge">1회 ${fmtQ(recipeOf(sel).a)}개 산출</span>
         ${recs.length > 1 ? `<span class="badge">레시피 ${recs.length}종</span>` : ''}
       </div>
@@ -708,7 +718,7 @@ function renderResult(){
   </div>
 
   <div class="sec">재료 내역 <span class="mut" style="font-weight:400;letter-spacing:0">
-    완제품 1개 기준 · 반환율 ${pct(c.rr)} 적용 (분해 단계는 반환 없음)</span></div>
+    완제품 1개 기준 · 반환율 ${pct(c.rr)} 적용</span></div>
   <div style="display:flex;gap:6px;margin-bottom:6px">
     <button class="mini" data-bulk="craft">하위 재료 전부 직접 제작</button>
     <button class="mini" data-bulk="buy">전부 시장에서 구매</button>
@@ -726,7 +736,7 @@ function renderResult(){
           ${'<span class="indent"></span>'.repeat(r.depth)}
           <img src="${icon(r.id,48)}" loading="lazy" alt="" onerror="imgFail(this)">
           <div class="tw"><div class="nm">${esc(nameOf(r.id))}${
-            noReturn(r.id) ? '<span class="tag nr">반환없음</span>' : ''}</div>
+            r.noret ? '<span class="tag nr">반환없음</span>' : ''}</div>
             <div class="id">${esc(r.id)}</div></div>
         </div></td>
         <td>${fmtQ(r.per)}</td>
@@ -777,9 +787,10 @@ function renderResult(){
   <div class="note">
     <b>계산 방식</b> · 반환율 = B/(1+B), B = 도시 기본 18% + 특화(정제 40% / 제작 15%)
     + 집중 59% + 일일·추가 보너스. 실소모 재료 = 기본 소모 ÷ (1+B).
-    아티팩트·토큰은 반환되지 않습니다.<br>
-    <b>분해</b> · 상위 연금 재료를 하위로 쪼개거나 물고기를 손질하는 고정 변환입니다.
-    집중을 쓰지 않고 자원 반환도 붙지 않아, 투입한 재료가 그대로 소모됩니다.<br>
+    <b>반환없음</b> 표시가 붙은 재료는 게임 데이터(maxreturnamount)가 반환 대상이 아니라고
+    명시한 것으로, 아티팩트·토큰·연금 희귀 재료 등이 해당합니다.<br>
+    <b>분해</b> · 상위 티어를 하위로 쪼개는 레시피입니다. 집중을 쓰지 않으며,
+    반환 여부는 위와 같이 게임 데이터를 따릅니다.<br>
     <b>제작소 사용료</b> · 아이템 가치 × 0.1125 × (사용료 ÷ 100). 아이템 가치는 게임 데이터의
     itemvalue, 없으면 재료 가치 합에서 유도합니다.<br>
     <b>세금</b> · 판매세 ${cfg.premium?'4% (프리미엄)':'8% (비프리미엄)'}${

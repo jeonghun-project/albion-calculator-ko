@@ -33,7 +33,11 @@ def parse_reqs(node, uniquename):
         for r in as_list(req.get('craftresource')):
             u = r.get('@uniquename')
             if not u: continue
-            mats.append([mid(u, r.get('@enchantmentlevel', 0)), float(r.get('@count', 1))])
+            m = [mid(u, r.get('@enchantmentlevel', 0)), float(r.get('@count', 1))]
+            # @maxreturnamount="0" → 이 재료는 자원 반환 대상이 아니다 (게임 데이터가 직접 표시)
+            if r.get('@maxreturnamount') == '0':
+                m.append(1)
+            mats.append(m)
         if not mats: continue
         out.append({
             'f': float(req.get('@craftingfocus', 0) or 0),
@@ -96,7 +100,7 @@ def item_value(i, depth=0):
     _cache[i] = 0.0  # 순환 방지
     best = 0.0
     for r in rec.get('r', []):
-        tot = sum(item_value(m, depth + 1) * c for m, c in r['m'])
+        tot = sum(item_value(m[0], depth + 1) * m[1] for m in r['m'])
         v = tot / (r['a'] or 1)
         best = max(best, v)
     _cache[i] = best
@@ -118,7 +122,7 @@ frontier = list(keep)
 while frontier:
     i = frontier.pop()
     for r in items.get(i, {}).get('r', []):
-        for m, _ in r['m']:
+        for m in [x[0] for x in r['m']]:
             if m in items and m not in keep:
                 keep.add(m); frontier.append(m)
 

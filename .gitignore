@@ -1,0 +1,5 @@
+# 게임 원본 덤프 (재빌드 시 curl 로 다시 받음, 40MB)
+items_raw.json
+items_formatted.json
+albion_data.json
+.DS_Store

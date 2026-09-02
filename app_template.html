@@ -1,0 +1,844 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>알비온 제작 계산기</title>
+<style>
+:root{
+  --bg:#12151b; --bg2:#181c24; --panel:#1e232d; --panel2:#252b37; --line:#2f3644;
+  --tx:#e6e9ef; --tx2:#9aa4b8; --tx3:#6b7488;
+  --acc:#d9a441; --acc2:#f0c26b;
+  --up:#4ec98a; --dn:#e5695f; --warn:#e0a458;
+  --t4:#7fa8d4; --t5:#d46b6b; --t6:#d99a4e; --t7:#5fc4a8; --t8:#c9cdd6;
+  --e1:#3f7f5f; --e2:#3f6f9f; --e3:#8f5faf; --e4:#b08040;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:var(--bg); color:var(--tx); font:13px/1.5 "Pretendard","Apple SD Gothic Neo",
+  "Malgun Gothic","Noto Sans KR",system-ui,-apple-system,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+a{color:var(--acc2)}
+
+/* ── 헤더 ───────────────────────────────── */
+header{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:10px 16px;background:var(--bg2);border-bottom:1px solid var(--line);
+  position:sticky;top:0;z-index:30;
+}
+.logo{font-weight:700;font-size:15px;letter-spacing:-.02em;color:var(--acc2);white-space:nowrap}
+.logo span{color:var(--tx3);font-weight:400;font-size:11px;margin-left:6px}
+.hspace{flex:1}
+.status{font-size:11px;color:var(--tx3);white-space:nowrap}
+.status b{color:var(--tx2);font-weight:600}
+
+/* ── 폼 요소 ────────────────────────────── */
+.field{display:flex;flex-direction:column;gap:3px}
+.field>label{font-size:10.5px;color:var(--tx3);letter-spacing:.02em}
+select,input[type=text],input[type=number],input[type=search]{
+  background:var(--panel2);border:1px solid var(--line);border-radius:5px;
+  padding:5px 7px;outline:none;min-width:0;
+}
+select:focus,input:focus{border-color:var(--acc)}
+input[type=number]{text-align:right;font-variant-numeric:tabular-nums}
+.btn{
+  background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:6px 12px;
+}
+.btn:hover{border-color:var(--acc);color:var(--acc2)}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#1a1408;font-weight:700}
+.btn.pri:hover{background:var(--acc2);color:#1a1408}
+.btn:disabled{opacity:.5;cursor:default}
+.seg{display:flex;border:1px solid var(--line);border-radius:5px;overflow:hidden}
+.seg button{background:var(--panel2);border:0;padding:5px 10px;color:var(--tx2);font-size:12px}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.on{background:var(--acc);color:#1a1408;font-weight:700}
+.chk{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--tx2);cursor:pointer;user-select:none}
+.chk input{accent-color:var(--acc);width:14px;height:14px}
+
+/* ── 레이아웃 ───────────────────────────── */
+.wrap{display:grid;grid-template-columns:300px 1fr;gap:0;height:calc(100vh - 49px)}
+@media(max-width:900px){.wrap{grid-template-columns:1fr;height:auto}}
+aside{border-right:1px solid var(--line);background:var(--bg2);display:flex;flex-direction:column;min-height:0}
+main{overflow-y:auto;padding:14px 16px 60px}
+
+/* ── 사이드바 ───────────────────────────── */
+.tabs{display:flex;flex-wrap:wrap;border-bottom:1px solid var(--line);flex-shrink:0}
+.tabs button{
+  flex:1 0 auto;background:none;border:0;border-bottom:2px solid transparent;
+  padding:8px 9px;color:var(--tx3);font-size:12px;white-space:nowrap;
+}
+.tabs button.on{color:var(--acc2);border-bottom-color:var(--acc);font-weight:700}
+.sbar{padding:9px 10px;display:flex;flex-direction:column;gap:7px;flex-shrink:0;border-bottom:1px solid var(--line)}
+.sbar input[type=search]{width:100%}
+.filters{display:flex;gap:5px;flex-wrap:wrap}
+.pill{
+  background:var(--panel2);border:1px solid var(--line);border-radius:20px;
+  padding:2px 9px;font-size:11px;color:var(--tx3);
+}
+.pill.on{background:var(--acc);border-color:var(--acc);color:#1a1408;font-weight:700}
+.list{overflow-y:auto;flex:1;min-height:240px}
+.row{
+  display:flex;align-items:center;gap:8px;padding:5px 10px;cursor:pointer;
+  border-left:2px solid transparent;
+}
+.row:hover{background:var(--panel)}
+.row.on{background:var(--panel);border-left-color:var(--acc)}
+.row img{width:30px;height:30px;flex-shrink:0;image-rendering:auto}
+.row .nm{flex:1;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .sub{font-size:10px;color:var(--tx3)}
+.tier{font-size:10px;font-weight:700;padding:1px 4px;border-radius:3px;background:var(--panel2)}
+.more{padding:10px;text-align:center;color:var(--tx3);font-size:11px}
+
+/* ── 설정 바 ────────────────────────────── */
+.cfg{
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:11px 13px;margin-bottom:14px;
+}
+.cfg h3{margin:0 0 9px;font-size:11px;color:var(--tx3);font-weight:600;letter-spacing:.06em}
+.cfgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:9px 12px}
+.cfgrow{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:10px;
+  padding-top:10px;border-top:1px solid var(--line)}
+
+/* ── 결과 ───────────────────────────────── */
+.head{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.head img{width:56px;height:56px}
+.head h2{margin:0;font-size:18px;letter-spacing:-.02em}
+.head .en{font-size:11px;color:var(--tx3)}
+.badges{display:flex;gap:5px;margin-top:4px;flex-wrap:wrap}
+.badge{font-size:10px;padding:1.5px 6px;border-radius:3px;background:var(--panel2);color:var(--tx2)}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:9px;margin-bottom:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+.card .k{font-size:10.5px;color:var(--tx3);margin-bottom:3px}
+.card .v{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.card .n{font-size:10.5px;color:var(--tx3);margin-top:2px}
+.card.big{grid-column:span 2}
+.up{color:var(--up)} .dn{color:var(--dn)} .mut{color:var(--tx3)}
+
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th{
+  text-align:right;font-size:10.5px;color:var(--tx3);font-weight:600;
+  padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap;
+}
+th:first-child{text-align:left}
+td{padding:4px 8px;text-align:right;border-bottom:1px solid #232936;font-size:12px}
+td:first-child{text-align:left}
+tbody tr:hover{background:#1b202a}
+.mat{display:flex;align-items:center;gap:7px}
+.mat img{width:26px;height:26px;flex-shrink:0}
+.mat .tw{min-width:0}
+.mat .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:230px}
+.mat .id{font-size:9.5px;color:var(--tx3);font-family:ui-monospace,Menlo,monospace}
+.indent{display:inline-block;width:16px}
+td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
+.tag{font-size:9.5px;padding:1px 5px;border-radius:3px;background:var(--panel2);
+  color:var(--tx3);margin-left:5px;white-space:nowrap;display:inline-block}
+.row img,.mat img,.head img{background:#232936;border-radius:4px}
+.tag.craft{background:#2b3a2f;color:var(--up)}
+.tag.nr{background:#3a2b2b;color:var(--dn)}
+.stale{color:var(--warn)}
+.mini{background:none;border:1px solid var(--line);border-radius:4px;padding:1px 7px;font-size:10.5px;color:var(--tx2)}
+.mini:hover{border-color:var(--acc);color:var(--acc2)}
+.mini.on{background:var(--acc);border-color:var(--acc);color:#1a1408;font-weight:700}
+
+.sec{margin:18px 0 8px;font-size:11px;color:var(--tx3);font-weight:600;letter-spacing:.06em;
+  display:flex;align-items:center;gap:8px}
+.sec:after{content:"";flex:1;height:1px;background:var(--line)}
+.empty{color:var(--tx3);text-align:center;padding:70px 20px;font-size:13px;line-height:2}
+.note{font-size:11px;color:var(--tx3);line-height:1.8;margin-top:16px;
+  border-top:1px solid var(--line);padding-top:12px}
+.note b{color:var(--tx2)}
+.err{background:#3a2222;border:1px solid #6b3a3a;color:#f0b0aa;padding:8px 11px;
+  border-radius:6px;font-size:12px;margin-bottom:12px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">알비온 제작 계산기<span>정제 · 제작 · 음식 · 물약</span></div>
+  <div class="field" style="width:120px">
+    <label>서버</label>
+    <select id="server">
+      <option value="east">아시아</option>
+      <option value="west">아메리카</option>
+      <option value="europe">유럽</option>
+    </select>
+  </div>
+  <button class="btn pri" id="refresh">시세 새로고침</button>
+  <div class="hspace"></div>
+  <div class="status" id="status">데이터 대기 중</div>
+</header>
+
+<div class="wrap">
+  <aside>
+    <div class="tabs" id="tabs"></div>
+    <div class="sbar">
+      <input type="search" id="q" placeholder="한글/영문/아이템ID 검색 (예: 판자, 브로드소드)" autocomplete="off">
+      <div class="filters" id="tierf"></div>
+      <div class="filters" id="enchf"></div>
+    </div>
+    <div class="list" id="list"></div>
+  </aside>
+  <main id="main"></main>
+</div>
+
+<script id="albion-data" type="application/json">__ALBION_DATA__</script>
+<script>
+/* ══════════════════════════════════════════════════════════════════
+   알비온 제작 계산기 — 데이터: ao-data/ao-bin-dumps
+   시세: Albion Online Data Project (albion-online-data.com)
+   Sandbox Interactive GmbH 와 무관한 비공식 도구입니다.
+   ══════════════════════════════════════════════════════════════════ */
+'use strict';
+
+const DATA  = JSON.parse(document.getElementById('albion-data').textContent);
+const ITEMS = DATA.items;
+const IX    = new Map(ITEMS.map(r => [r.id, r]));
+ITEMS.sort((a,b) =>
+  (a.t||99) - (b.t||99) || (a.e||0) - (b.e||0) ||
+  (a.ko||'').localeCompare(b.ko||'', 'ko'));
+
+/* ── 도시 ─────────────────────────────────────────────────────── */
+const CITIES = [
+  ['Martlock','마틀록'], ['Lymhurst','림허스트'], ['Bridgewatch','브릿지워치'],
+  ['Fort Sterling','포트 스털링'], ['Thetford','셋포드'],
+  ['Caerleon','카를레온'], ['Brecilien','브레실리엔'],
+];
+const CITY_KO = Object.fromEntries(CITIES);
+
+/* 정제 특화 도시 (+40%) */
+const REFINE_CITY = { wood:'Fort Sterling', ore:'Thetford', hide:'Martlock',
+                      fiber:'Lymhurst', rock:'Bridgewatch' };
+/* 제작 특화 도시 (+15%) */
+const CRAFT_CITY = {
+  axe:'Martlock', quarterstaff:'Martlock', froststaff:'Martlock',
+  plate_shoes:'Martlock', offhand:'Martlock',
+  crossbow:'Bridgewatch', dagger:'Bridgewatch', cursestaff:'Bridgewatch',
+  plate_armor:'Bridgewatch', cloth_shoes:'Bridgewatch',
+  sword:'Lymhurst', bow:'Lymhurst', arcanestaff:'Lymhurst',
+  leather_helmet:'Lymhurst', leather_shoes:'Lymhurst',
+  hammer:'Fort Sterling', spear:'Fort Sterling', holystaff:'Fort Sterling',
+  cloth_armor:'Fort Sterling', plate_helmet:'Fort Sterling',
+  mace:'Thetford', naturestaff:'Thetford', firestaff:'Thetford',
+  leather_armor:'Thetford', cloth_helmet:'Thetford',
+};
+const isRefineCat = cc => cc in REFINE_CITY;
+const bonusCityOf = r => REFINE_CITY[r.cc] || CRAFT_CITY[r.cc] || null;
+
+/* 자원 반환이 적용되지 않는 재료 (아티팩트 · 토큰 · 퀘스트템) */
+const noReturn = id => id.includes('ARTEFACT') || id.includes('TOKEN') ||
+                       id.startsWith('QUESTITEM');
+
+/* ── 카테고리 탭 ──────────────────────────────────────────────── */
+const TABS = [
+  ['refine', '정제·재료', r => r.sc === 'crafting' || r.sc === 'farming'],
+  ['weapon', '무기',     r => r.sc === 'weapons' || r.sc === 'offhands' ||
+                              (r.sc === 'artefacts' && (r.s1 === 'weapons' || r.s1 === 'offhands'))],
+  ['armor',  '방어구',   r => ['armors','head','shoes'].includes(r.sc) ||
+                              (r.sc === 'artefacts' && ['armors','head','shoes'].includes(r.s1))],
+  ['acc',    '가방·망토', r => r.sc === 'bags' || r.sc === 'capes' ||
+                              (r.sc === 'artefacts' && r.s1 === 'capes')],
+  ['food',   '음식',     r => r.sc === 'consumables' && r.s1 === 'food'],
+  ['potion', '물약',     r => r.sc === 'consumables' && r.s1 === 'potions'],
+  ['mount',  '탈것',     r => r.sc === 'mounts'],
+  ['tool',   '채집·도구', r => r.sc === 'gathering'],
+  ['all',    '전체',     () => true],
+];
+
+/* ── 설정 ─────────────────────────────────────────────────────── */
+const DEF = {
+  server:'east', buyCity:'Martlock', sellCity:'Martlock',
+  station:'bonus',        // island | city | bonus | hideout
+  focus:false, fce:0, daily:0, extra:0,
+  premium:true, sellMode:'order',   // order | instant
+  buyMode:'instant',                // instant | order
+  fee:800, qty:100, quality:1,
+};
+const cfg = Object.assign({}, DEF, JSON.parse(localStorage.getItem('ao_cfg') || '{}'));
+const saveCfg = () => localStorage.setItem('ao_cfg', JSON.stringify(cfg));
+
+let sel        = localStorage.getItem('ao_sel') || 'T4_PLANKS';
+let tab        = 'refine';
+let tierF      = 0, enchF = -1, query = '';
+const craftSet = new Set(JSON.parse(localStorage.getItem('ao_craft') || '[]'));
+const recipePick = new Map();
+const override = new Map(Object.entries(JSON.parse(localStorage.getItem('ao_ovr') || '{}')));
+const saveCraft = () => localStorage.setItem('ao_craft', JSON.stringify([...craftSet]));
+const saveOvr   = () => localStorage.setItem('ao_ovr',
+                    JSON.stringify(Object.fromEntries(override)));
+
+/* ── 시세 캐시 ────────────────────────────────────────────────── */
+const prices = new Map();          // `${id}|${city}|${q}` -> {s,b,sd,bd}
+const pkey = (id, city, q) => `${id}|${city}|${q}`;
+let fetching = false, lastFetch = null;
+
+/* ══ 유틸 ═══════════════════════════════════════════════════════ */
+const fmt  = n => !isFinite(n) ? '—' : Math.round(n).toLocaleString('ko-KR');
+const fmt1 = n => !isFinite(n) ? '—' : n.toLocaleString('ko-KR',{maximumFractionDigits:1});
+const pct  = n => !isFinite(n) ? '—' : (n*100).toFixed(1) + '%';
+const esc  = s => String(s).replace(/[&<>"]/g, c =>
+                  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const icon = (id, sz=64) =>
+  `https://render.albiononline.com/v1/item/${encodeURIComponent(id)}.png?size=${sz}&quality=1`;
+/* 아이콘 서버가 간헐적으로 502 를 뱉으므로 한 번 재시도 후 자리만 남긴다 */
+window.imgFail = el => {
+  if(el.dataset.retry){ el.style.visibility = 'hidden'; return; }
+  el.dataset.retry = '1';
+  const src = el.src;
+  setTimeout(() => { el.src = src + '&r=1'; }, 1500 + Math.random() * 1500);
+};
+
+function nameOf(id){
+  const r = IX.get(id);
+  if(!r) return id;
+  return r.e ? `${r.ko} .${r.e}` : r.ko;
+}
+function tierLabel(r){
+  return 'T' + (r.t || '?') + (r.e ? '.' + r.e : '');
+}
+function ago(d){
+  if(!d) return null;
+  const h = (Date.now() - new Date(d + 'Z').getTime()) / 36e5;
+  if(h < 0 || !isFinite(h)) return null;
+  if(h < 1)  return Math.round(h*60) + '분 전';
+  if(h < 48) return Math.round(h) + '시간 전';
+  return Math.round(h/24) + '일 전';
+}
+function staleH(d){
+  if(!d) return Infinity;
+  return (Date.now() - new Date(d + 'Z').getTime()) / 36e5;
+}
+
+/* ══ 반환율 ═════════════════════════════════════════════════════
+   RRR = B / (1 + B)  —  B는 보너스 합(가산)
+   도시 기본 +18% / 정제 특화 +40% / 제작 특화 +15% / 집중 +59%      */
+function bonusSum(rec){
+  let b = 0;
+  if(cfg.station === 'city' || cfg.station === 'hideout') b += 0.18;
+  else if(cfg.station === 'bonus') b += 0.18 + (isRefineCat(rec.cc) ? 0.40 : 0.15);
+  if(cfg.focus) b += 0.59;
+  b += cfg.daily / 100 + cfg.extra / 100;
+  return b;
+}
+const returnRate = rec => { const b = bonusSum(rec); return b / (1 + b); };
+const matMult    = rec => 1 / (1 + bonusSum(rec));   // 실제 소모 배수
+const focusMult  = () => Math.pow(0.5, (cfg.fce || 0) / 10000);
+
+/* ══ 가격 ═══════════════════════════════════════════════════════ */
+function rawPrice(id, city, q = 1){
+  return prices.get(pkey(id, city, q)) || null;
+}
+/** 재료 매입가 */
+function buyPrice(id){
+  if(override.has(id)) return { v: +override.get(id), src: 'manual' };
+  const p = rawPrice(id, cfg.buyCity, 1);
+  if(!p) return { v: NaN, src: 'none' };
+  const v = cfg.buyMode === 'instant' ? p.s : p.b;
+  return { v: v || NaN, src: cfg.buyMode, date: cfg.buyMode === 'instant' ? p.sd : p.bd };
+}
+/** 완제품 판매가 */
+function sellPrice(id){
+  if(override.has('SELL:' + id)) return { v: +override.get('SELL:' + id), src: 'manual' };
+  const p = rawPrice(id, cfg.sellCity, cfg.quality) || rawPrice(id, cfg.sellCity, 1);
+  if(!p) return { v: NaN, src: 'none' };
+  const v = cfg.sellMode === 'instant' ? p.b : p.s;
+  return { v: v || NaN, src: cfg.sellMode, date: cfg.sellMode === 'instant' ? p.bd : p.sd };
+}
+const salesTax = () => cfg.premium ? 0.04 : 0.08;
+const setupFee = () => cfg.sellMode === 'order' ? 0.025 : 0;
+
+/* ══ 원가 엔진 ══════════════════════════════════════════════════ */
+function recipeOf(id){
+  const r = IX.get(id);
+  if(!r || !r.r || !r.r.length) return null;
+  const i = Math.min(recipePick.get(id) ?? 0, r.r.length - 1);
+  return r.r[i];
+}
+const canCraft = id => !!recipeOf(id);
+const willCraft = (id, depth) => depth === 0 || (canCraft(id) && craftSet.has(id));
+
+/** 한 개당 원가를 재귀 계산하고 트리 노드를 채운다 */
+function unitCost(id, depth, stack, out){
+  const rec = IX.get(id);
+  if(!rec) return { cost: NaN, focus: 0, fame: 0, fee: 0 };
+
+  if(!willCraft(id, depth) || stack.has(id)){
+    const bp = buyPrice(id);
+    return { cost: bp.v, focus: 0, fame: 0, fee: 0, buy: true };
+  }
+  const r = recipeOf(id);
+  stack.add(id);
+  const mult = matMult(rec);
+  let mats = 0, focus = 0, fame = 0, fee = 0;
+  const kids = [];
+  for(const [mid, cnt] of r.m){
+    const per  = cnt / r.a;                                  // 완제품 1개당 기본 소모
+    const need = per * (noReturn(mid) ? 1 : mult);           // 반환 적용 후 실소모
+    const sub  = unitCost(mid, depth + 1, stack, out);
+    mats  += sub.cost * need;
+    focus += sub.focus * need;
+    fame  += sub.fame  * need + (IX.get(mid)?.fv || 0) * per;
+    fee   += sub.fee   * need;
+    kids.push({ id: mid, per, need, unit: sub.cost, total: sub.cost * need,
+                buy: sub.buy, depth: depth + 1 });
+  }
+  stack.delete(id);
+  const myFee   = 0.1125 * (rec.iv || 0) * (cfg.fee / 100);
+  const myFocus = (r.f / r.a) * focusMult();
+  const silver  = (r.s || 0) / r.a;
+  out.push({ id, depth, recipe: r, kids, mats, fee: myFee, focus: myFocus });
+  return { cost: mats + myFee + silver, focus: focus + (cfg.focus ? myFocus : 0),
+           fame: fame, fee: fee + myFee, buy: false };
+}
+
+function calc(){
+  const rec = IX.get(sel);
+  if(!rec || !rec.r) return null;
+  const nodes = [];
+  const u = unitCost(sel, 0, new Set(), nodes);
+  const qty = cfg.qty || 1;
+
+  const sp   = sellPrice(sel);
+  const gross = sp.v * qty;
+  const tax   = gross * (salesTax() + setupFee());
+  const net   = gross - tax;
+  const cost  = u.cost * qty;
+  const profit = net - cost;
+
+  return {
+    rec, nodes, unit: u.cost, cost, qty,
+    focusTotal: u.focus * qty, fameTotal: u.fame * qty, feeTotal: u.fee * qty,
+    sellUnit: sp.v, sp, gross, tax, net, profit,
+    margin: cost > 0 ? profit / cost : NaN,
+    perFocus: u.focus > 0 ? profit / (u.focus * qty) : NaN,
+    rr: returnRate(rec), b: bonusSum(rec),
+  };
+}
+
+/* ══ 시세 조회 ══════════════════════════════════════════════════ */
+function neededIds(){
+  const s = new Set([sel]);
+  const nodes = [];
+  unitCost(sel, 0, new Set(), nodes);
+  for(const n of nodes){ s.add(n.id); n.kids.forEach(k => s.add(k.id)); }
+  return [...s];
+}
+async function fetchPrices(){
+  if(fetching) return;
+  fetching = true;
+  setStatus('시세 불러오는 중…');
+  const ids    = neededIds();
+  const cities = [...new Set([cfg.buyCity, cfg.sellCity])];
+  const base   = `https://${cfg.server}.albion-online-data.com/api/v2/stats/prices/`;
+  const qs     = `?locations=${cities.map(encodeURIComponent).join(',')}&qualities=1,2,3,4,5`;
+  let got = 0, err = null;
+  try{
+    for(let i = 0; i < ids.length; i += 90){
+      const chunk = ids.slice(i, i + 90).map(encodeURIComponent).join(',');
+      const res = await fetch(base + chunk + qs);
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      for(const p of await res.json()){
+        prices.set(pkey(p.item_id, p.city, p.quality), {
+          s: p.sell_price_min, b: p.buy_price_max,
+          sd: p.sell_price_min_date.startsWith('0001') ? null : p.sell_price_min_date,
+          bd: p.buy_price_max_date .startsWith('0001') ? null : p.buy_price_max_date,
+        });
+        got++;
+      }
+    }
+    lastFetch = new Date();
+  }catch(e){ err = e.message; }
+  fetching = false;
+  setStatus(err ? `시세 조회 실패: ${err}`
+                : `${ids.length}종 · ${got}건 · ${lastFetch.toLocaleTimeString('ko-KR')} 갱신`);
+  render();
+}
+const setStatus = t => document.getElementById('status').textContent = t;
+
+/* ══ 사이드바 ═══════════════════════════════════════════════════ */
+function matches(r){
+  if(!r.r) return false;
+  // 검색어가 있으면 카테고리 탭 제한을 풀어 전체에서 찾는다
+  if(!query){
+    const t = TABS.find(t => t[0] === tab);
+    if(t && !t[2](r)) return false;
+  }
+  if(tierF && r.t !== tierF) return false;
+  if(enchF >= 0 && (r.e || 0) !== enchF) return false;
+  if(query){
+    const q = query.toLowerCase();
+    if(!(r.ko || '').toLowerCase().includes(q) &&
+       !(r.en || '').toLowerCase().includes(q) &&
+       !r.id.toLowerCase().includes(q)) return false;
+  }
+  return true;
+}
+function renderSidebar(){
+  document.getElementById('tabs').innerHTML = TABS.map(t =>
+    `<button data-tab="${t[0]}" class="${!query && t[0] === tab ? 'on' : ''}">${t[1]}</button>`).join('')
+    + (query ? `<div class="more" style="flex-basis:100%;padding:4px">검색 중 — 전체 카테고리에서 찾습니다</div>` : '');
+  document.getElementById('tierf').innerHTML =
+    ['전체',4,5,6,7,8].map((t,i) => {
+      const v = i === 0 ? 0 : t;
+      return `<button class="pill ${tierF===v?'on':''}" data-tier="${v}">${i?'T'+t:'티어 전체'}</button>`;
+    }).join('');
+  document.getElementById('enchf').innerHTML =
+    ['인챈트 전체','.0','.1','.2','.3','.4'].map((t,i) => {
+      const v = i === 0 ? -1 : i - 1;
+      return `<button class="pill ${enchF===v?'on':''}" data-ench="${v}">${t}</button>`;
+    }).join('');
+
+  const hits = ITEMS.filter(matches);
+  const show = hits.slice(0, 250);
+  const listEl = document.getElementById('list');
+  const keepTop = listEl.scrollTop;
+  listEl.innerHTML = show.map(r => `
+    <div class="row ${r.id===sel?'on':''}" data-id="${esc(r.id)}">
+      <img src="${icon(r.id,64)}" loading="lazy" alt="" onerror="imgFail(this)">
+      <div class="nm">${esc(nameOf(r.id))}
+        <div class="sub">${esc(r.en || '')}</div></div>
+      <span class="tier">${tierLabel(r)}</span>
+    </div>`).join('') +
+    (hits.length > show.length
+      ? `<div class="more">${hits.length - show.length}종 더 있음 — 검색으로 좁혀보세요</div>`
+      : hits.length ? '' : `<div class="more">일치하는 제작 아이템이 없습니다</div>`);
+  listEl.scrollTop = keepTop;
+}
+
+/* ══ 설정 패널 ══════════════════════════════════════════════════ */
+function cfgPanel(rec){
+  const bc = rec ? bonusCityOf(rec) : null;
+  const cityOpts = (v) => CITIES.map(([e,k]) =>
+    `<option value="${e}" ${v===e?'selected':''}>${k}</option>`).join('');
+  const stations = [['island','섬 (보너스 없음)'],['city','도시 (일반)'],
+                    ['bonus','보너스 도시'],['hideout','은신처']];
+  return `
+  <div class="cfg">
+    <h3>제작 조건</h3>
+    <div class="cfgrid">
+      <div class="field"><label>재료 구매 도시</label>
+        <select data-cfg="buyCity">${cityOpts(cfg.buyCity)}</select></div>
+      <div class="field"><label>완제품 판매 도시</label>
+        <select data-cfg="sellCity">${cityOpts(cfg.sellCity)}</select></div>
+      <div class="field"><label>제작 장소</label>
+        <select data-cfg="station">${stations.map(([v,k]) =>
+          `<option value="${v}" ${cfg.station===v?'selected':''}>${k}</option>`).join('')}</select></div>
+      <div class="field"><label>수량</label>
+        <input type="number" data-cfg="qty" value="${cfg.qty}" min="1" step="1"></div>
+      <div class="field"><label>제작소 사용료 (100영양당)</label>
+        <input type="number" data-cfg="fee" value="${cfg.fee}" min="0" step="50"></div>
+      <div class="field"><label>집중 비용 효율 (FCE)</label>
+        <input type="number" data-cfg="fce" value="${cfg.fce}" min="0" step="1000"></div>
+      <div class="field"><label>일일 보너스 %</label>
+        <input type="number" data-cfg="daily" value="${cfg.daily}" min="0" step="5"></div>
+      <div class="field"><label>추가 보너스 %</label>
+        <input type="number" data-cfg="extra" value="${cfg.extra}" step="1"></div>
+      <div class="field"><label>완제품 품질</label>
+        <select data-cfg="quality">${
+          [[1,'일반'],[2,'좋음'],[3,'뛰어남'],[4,'훌륭함'],[5,'걸작']].map(([v,k]) =>
+          `<option value="${v}" ${+cfg.quality===v?'selected':''}>${k}</option>`).join('')}</select></div>
+    </div>
+    <div class="cfgrow">
+      <label class="chk"><input type="checkbox" data-cfg="focus" ${cfg.focus?'checked':''}>집중 사용 (+59%)</label>
+      <label class="chk"><input type="checkbox" data-cfg="premium" ${cfg.premium?'checked':''}>프리미엄 (판매세 4%)</label>
+      <div class="field"><label>재료 매입 방식</label>
+        <div class="seg" data-seg="buyMode">
+          <button data-v="instant" class="${cfg.buyMode==='instant'?'on':''}">즉시 구매</button>
+          <button data-v="order"   class="${cfg.buyMode==='order'?'on':''}">구매 주문</button>
+        </div></div>
+      <div class="field"><label>완제품 판매 방식</label>
+        <div class="seg" data-seg="sellMode">
+          <button data-v="order"   class="${cfg.sellMode==='order'?'on':''}">판매 주문</button>
+          <button data-v="instant" class="${cfg.sellMode==='instant'?'on':''}">즉시 판매</button>
+        </div></div>
+      ${bc ? `<div class="status">이 아이템의 보너스 도시: <b>${CITY_KO[bc]}</b>
+              (${isRefineCat(rec.cc)?'정제 +40%':'제작 +15%'})</div>`
+           : `<div class="status">이 아이템은 도시 특화 보너스가 없습니다</div>`}
+    </div>
+  </div>`;
+}
+
+/* ══ 재료 트리 ══════════════════════════════════════════════════ */
+function treeRows(id, depth, qtyPer, seen, rows){
+  const craft = willCraft(id, depth) && !seen.has(id);
+  const rec = IX.get(id);
+  if(craft){
+    const r = recipeOf(id);
+    const mult = matMult(rec);
+    seen.add(id);
+    for(const [mid, cnt] of r.m){
+      const per  = (cnt / r.a) * qtyPer;
+      const need = per * (noReturn(mid) ? 1 : mult);
+      const sub  = willCraft(mid, depth + 1) && !seen.has(mid);
+      rows.push({ id: mid, depth, per, need, craftable: canCraft(mid), crafting: sub });
+      if(sub) treeRows(mid, depth + 1, need, seen, rows);
+    }
+    seen.delete(id);
+  }
+  return rows;
+}
+
+function priceCell(id, crafting, unitCostVal){
+  if(crafting) return `<span class="mut">${fmt(unitCostVal)}</span> <span class="tag craft">직접제작</span>`;
+  const bp = buyPrice(id);
+  if(bp.src === 'manual')
+    return `${fmt(bp.v)} <span class="tag">수동</span>`;
+  if(!isFinite(bp.v) || !bp.v)
+    return `<span class="stale">시세 없음</span>`;
+  const h = staleH(bp.date);
+  return `${fmt(bp.v)}${h > 24 ? ` <span class="tag stale">${ago(bp.date)}</span>` : ''}`;
+}
+
+/* 트리 안의 각 아이템 1개당 원가 (표시용) */
+function unitOf(id){
+  return unitCost(id, 1, new Set(), []).cost;
+}
+
+/* ══ 메인 ═══════════════════════════════════════════════════════ */
+function render(){
+  renderSidebar();
+  const main = document.getElementById('main');
+  const rec = IX.get(sel);
+  if(!rec || !rec.r){
+    main.innerHTML = `<div class="empty">왼쪽에서 제작할 아이템을 선택하세요.<br>
+      <span class="mut">한글 이름으로 검색됩니다 — 예: 판자, 강철 주괴, 스튜, 치유 포션</span></div>`;
+    return;
+  }
+  const c = calc();
+  const rows = treeRows(sel, 0, 1, new Set(), []);
+  const bc = bonusCityOf(rec);
+  const recs = rec.r;
+
+  const profitCls = c.profit > 0 ? 'up' : c.profit < 0 ? 'dn' : '';
+  const noSell = !isFinite(c.sellUnit) || !c.sellUnit;
+
+  main.innerHTML = `
+  ${cfgPanel(rec)}
+
+  <div class="head">
+    <img src="${icon(sel,128)}" alt="" onerror="imgFail(this)">
+    <div>
+      <h2>${esc(nameOf(sel))}</h2>
+      <div class="en">${esc(rec.en || '')} · <code>${esc(sel)}</code></div>
+      <div class="badges">
+        <span class="badge">${tierLabel(rec)}</span>
+        ${bc ? `<span class="badge">보너스 도시 ${CITY_KO[bc]}</span>` : ''}
+        <span class="badge">반환율 ${pct(c.rr)} (보너스 합 ${fmt1(c.b*100)}%)</span>
+        <span class="badge">1회 제작 ${fmt1(recipeOf(sel).a)}개</span>
+        ${recs.length > 1 ? `<span class="badge">레시피 ${recs.length}종</span>` : ''}
+      </div>
+    </div>
+  </div>
+
+  ${recs.length > 1 ? `<div class="cfg" style="padding:8px 12px">
+    <h3 style="margin-bottom:6px">레시피 선택</h3>
+    ${recs.map((r,i) => `<button class="mini ${(recipePick.get(sel)??0)===i?'on':''}"
+        data-recipe="${i}" style="margin:2px 4px 2px 0">${
+        r.m.map(([m,ct]) => `${esc(nameOf(m))}×${fmt1(ct)}`).join(' + ')}</button>`).join('')}
+  </div>` : ''}
+
+  <div class="cards">
+    <div class="card"><div class="k">개당 원가</div>
+      <div class="v">${fmt(c.unit)}</div>
+      <div class="n">재료 + 수수료</div></div>
+    <div class="card"><div class="k">개당 판매가</div>
+      <div class="v">${noSell ? '<span class="stale">시세 없음</span>' : fmt(c.sellUnit)}</div>
+      <div class="n">${CITY_KO[cfg.sellCity]} · ${cfg.sellMode==='order'?'판매 주문':'즉시 판매'}${
+        c.sp.date ? ' · ' + ago(c.sp.date) : ''}</div></div>
+    <div class="card"><div class="k">개당 순이익</div>
+      <div class="v ${profitCls}">${noSell ? '—' : fmt(c.profit / c.qty)}</div>
+      <div class="n">세금 ${pct(salesTax()+setupFee())} 차감 후</div></div>
+    <div class="card"><div class="k">이익률</div>
+      <div class="v ${profitCls}">${noSell ? '—' : pct(c.margin)}</div>
+      <div class="n">순이익 ÷ 원가</div></div>
+    <div class="card"><div class="k">집중 1당 이익</div>
+      <div class="v ${profitCls}">${cfg.focus && !noSell ? fmt1(c.perFocus) : '—'}</div>
+      <div class="n">${cfg.focus ? `총 ${fmt(c.focusTotal)} 집중` : '집중 미사용'}</div></div>
+    <div class="card"><div class="k">제작 명성 (추정)</div>
+      <div class="v">${fmt(c.fameTotal)}</div>
+      <div class="n">${cfg.qty}개 기준</div></div>
+  </div>
+
+  <div class="cards">
+    <div class="card big"><div class="k">${fmt(c.qty)}개 총 원가</div>
+      <div class="v">${fmt(c.cost)}</div>
+      <div class="n">제작소 사용료 ${fmt(c.feeTotal)} 포함</div></div>
+    <div class="card big"><div class="k">${fmt(c.qty)}개 판매 수익 (세후)</div>
+      <div class="v">${noSell ? '—' : fmt(c.net)}</div>
+      <div class="n">세금 ${fmt(c.tax)}</div></div>
+    <div class="card big"><div class="k">총 순이익</div>
+      <div class="v ${profitCls}">${noSell ? '—' : fmt(c.profit)}</div>
+      <div class="n">${noSell ? '판매 시세가 없어 수익 계산 불가' : (c.profit>0?'흑자':'적자')}</div></div>
+  </div>
+
+  <div class="sec">재료 내역 <span class="mut" style="font-weight:400;letter-spacing:0">
+    완제품 1개 기준 · 반환율 ${pct(c.rr)} 적용</span></div>
+  <div style="display:flex;gap:6px;margin-bottom:6px">
+    <button class="mini" data-bulk="craft">하위 재료 전부 직접 제작</button>
+    <button class="mini" data-bulk="buy">전부 시장에서 구매</button>
+  </div>
+  <table>
+    <thead><tr>
+      <th>재료</th><th>기본 소모</th><th>실소모</th><th>단가</th>
+      <th>${fmt(c.qty)}개분 수량</th><th>비용</th><th style="text-align:center">직접 제작</th>
+    </tr></thead>
+    <tbody>
+    ${rows.map(r => {
+      const u = r.crafting ? unitOf(r.id) : buyPrice(r.id).v;
+      return `<tr>
+        <td><div class="mat">
+          ${'<span class="indent"></span>'.repeat(r.depth)}
+          <img src="${icon(r.id,48)}" loading="lazy" alt="" onerror="imgFail(this)">
+          <div class="tw"><div class="nm">${esc(nameOf(r.id))}${
+            noReturn(r.id) ? '<span class="tag nr">반환없음</span>' : ''}</div>
+            <div class="id">${esc(r.id)}</div></div>
+        </div></td>
+        <td>${fmt1(r.per)}</td>
+        <td>${fmt1(r.need)}</td>
+        <td>${priceCell(r.id, r.crafting, u)}</td>
+        <td>${fmt1(r.need * c.qty)}</td>
+        <td>${isFinite(u) ? fmt(u * r.need * c.qty) : '—'}</td>
+        <td style="text-align:center">${r.craftable
+          ? `<button class="mini ${r.crafting?'on':''}" data-craft="${esc(r.id)}">${
+              r.crafting ? '제작 중' : '제작'}</button>`
+          : '<span class="mut">—</span>'}</td>
+      </tr>`;
+    }).join('')}
+    </tbody>
+  </table>
+
+  <div class="sec">가격 직접 입력 <span class="mut" style="font-weight:400;letter-spacing:0">
+    시세가 없거나 실제 거래가와 다를 때 덮어씁니다</span></div>
+  <table>
+    <thead><tr><th>아이템</th><th>자동 시세</th><th>직접 입력</th><th></th></tr></thead>
+    <tbody>
+      ${[...new Set([...rows.filter(r => !r.crafting).map(r => r.id)])].map(id => {
+        const p = rawPrice(id, cfg.buyCity, 1);
+        const auto = p ? (cfg.buyMode==='instant' ? p.s : p.b) : 0;
+        return `<tr>
+          <td><div class="mat"><img src="${icon(id,48)}" loading="lazy" alt="" onerror="imgFail(this)">
+            <div class="tw"><div class="nm">${esc(nameOf(id))}</div>
+            <div class="id">${esc(id)}</div></div></div></td>
+          <td>${auto ? fmt(auto) : '<span class="stale">없음</span>'}</td>
+          <td><input type="number" data-ovr="${esc(id)}" placeholder="자동"
+               value="${override.has(id) ? esc(override.get(id)) : ''}"></td>
+          <td style="text-align:left"><span class="mut">${p && p.sd ? ago(p.sd) : ''}</span></td>
+        </tr>`;
+      }).join('')}
+      <tr>
+        <td><div class="mat"><img src="${icon(sel,48)}" alt="" onerror="imgFail(this)">
+          <div class="tw"><div class="nm">${esc(nameOf(sel))} <span class="tag">판매가</span></div>
+          <div class="id">${esc(sel)}</div></div></div></td>
+        <td>${isFinite(c.sellUnit) && c.sellUnit ? fmt(c.sellUnit) : '<span class="stale">없음</span>'}</td>
+        <td><input type="number" data-ovr="SELL:${esc(sel)}" placeholder="자동"
+             value="${override.has('SELL:'+sel) ? esc(override.get('SELL:'+sel)) : ''}"></td>
+        <td style="text-align:left"><span class="mut">${c.sp.date ? ago(c.sp.date) : ''}</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <b>계산 방식</b> · 반환율 = B/(1+B), B = 도시 기본 18% + 특화(정제 40% / 제작 15%)
+    + 집중 59% + 일일·추가 보너스. 실소모 재료 = 기본 소모 ÷ (1+B).
+    아티팩트·토큰은 반환되지 않습니다.<br>
+    <b>제작소 사용료</b> · 아이템 가치 × 0.1125 × (사용료 ÷ 100). 아이템 가치는 게임 데이터의
+    itemvalue, 없으면 재료 가치 합에서 유도합니다.<br>
+    <b>세금</b> · 판매세 ${cfg.premium?'4% (프리미엄)':'8% (비프리미엄)'}${
+      cfg.sellMode==='order'?' + 판매 주문 등록비 2.5%':''}.<br>
+    <b>명성</b>은 소모 재료의 famevalue 합으로 계산한 추정치입니다.<br>
+    데이터: <a href="https://github.com/ao-data/ao-bin-dumps" target="_blank" rel="noopener">ao-bin-dumps</a>
+    (${DATA.meta.generated} 기준, ${fmt(DATA.meta.count)}종) ·
+    시세: <a href="https://www.albion-online-data.com/" target="_blank" rel="noopener">Albion Online Data Project</a>.
+    Sandbox Interactive GmbH 와 무관한 비공식 도구입니다.
+  </div>`;
+}
+
+/* ══ 이벤트 ═════════════════════════════════════════════════════ */
+let t = null;
+const later = (fn, ms=250) => { clearTimeout(t); t = setTimeout(fn, ms); };
+
+/** 다시 그린 뒤 입력 중이던 칸으로 커서를 되돌린다 */
+function restoreFocus(fn){
+  const a = document.activeElement;
+  const k = a && (a.dataset.ovr !== undefined ? `[data-ovr="${CSS.escape(a.dataset.ovr)}"]`
+          : a.dataset.cfg ? `[data-cfg="${a.dataset.cfg}"]` : null);
+  fn();
+  if(!k) return;
+  const n = document.querySelector(k);
+  if(n && n.focus){
+    n.focus();
+    if(n.setSelectionRange && n.type !== 'number') n.setSelectionRange(n.value.length, n.value.length);
+  }
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('button');
+  const row = e.target.closest('.row');
+  if(row){ sel = row.dataset.id; localStorage.setItem('ao_sel', sel);
+           recipePick.clear(); document.getElementById('main').scrollTop = 0;
+           render(); fetchPrices(); return; }
+  if(!b) return;
+  if(b.dataset.tab   !== undefined){ tab = b.dataset.tab; renderSidebar(); return; }
+  if(b.dataset.tier  !== undefined){ tierF = +b.dataset.tier; renderSidebar(); return; }
+  if(b.dataset.ench  !== undefined){ enchF = +b.dataset.ench; renderSidebar(); return; }
+  if(b.dataset.craft !== undefined){
+    const id = b.dataset.craft;
+    craftSet.has(id) ? craftSet.delete(id) : craftSet.add(id);
+    saveCraft(); render(); fetchPrices(); return;
+  }
+  if(b.dataset.recipe !== undefined){
+    recipePick.set(sel, +b.dataset.recipe); render(); fetchPrices(); return;
+  }
+  if(b.dataset.bulk !== undefined){
+    if(b.dataset.bulk === 'buy'){ craftSet.clear(); }
+    else{
+      const walk = (id, depth, seen) => {
+        if(seen.has(id)) return;
+        seen.add(id);
+        const r = recipeOf(id);
+        if(!r) return;
+        for(const [mid] of r.m){
+          if(canCraft(mid)){ craftSet.add(mid); walk(mid, depth+1, seen); }
+        }
+        seen.delete(id);
+      };
+      walk(sel, 0, new Set());
+    }
+    saveCraft(); render(); fetchPrices(); return;
+  }
+  if(b.id === 'refresh'){ fetchPrices(); return; }
+  const seg = b.closest('[data-seg]');
+  if(seg){ cfg[seg.dataset.seg] = b.dataset.v; saveCfg(); render(); return; }
+});
+
+document.addEventListener('input', e => {
+  const el = e.target;
+  if(el.id === 'q'){ query = el.value.trim(); later(renderSidebar, 120); return; }
+  if(el.id === 'server'){ cfg.server = el.value; saveCfg(); prices.clear(); fetchPrices(); return; }
+  if(el.dataset.cfg){
+    const k = el.dataset.cfg;
+    cfg[k] = el.type === 'checkbox' ? el.checked
+           : el.type === 'number'   ? (+el.value || 0) : el.value;
+    saveCfg();
+    const refetch = ['buyCity','sellCity'].includes(k);
+    later(() => { restoreFocus(() => render()); if(refetch) fetchPrices(); }, 250);
+    return;
+  }
+  if(el.dataset.ovr !== undefined){
+    const id = el.dataset.ovr;
+    el.value === '' ? override.delete(id) : override.set(id, el.value);
+    saveOvr();
+    later(() => restoreFocus(() => render()), 400);
+  }
+});
+
+document.getElementById('server').value = cfg.server;
+render();
+fetchPrices();
+</script>
+</body>
+</html>

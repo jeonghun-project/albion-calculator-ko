@@ -387,13 +387,19 @@ function recipeOf(id){
 }
 const canCraft = id => !!recipeOf(id);
 const willCraft = (id, depth) => depth === 0 || (canCraft(id) && craftSet.has(id));
+/* 시장에 안 올라오는 재료(인챈트된 완제품·중간재)는 '구매'로 두면 원가가 통째로 비어버린다.
+   살 수 없고 만들 수는 있으면 제작 원가로 대신한다 — 이래야 룬 인챈트 경로처럼
+   아래 단계 완제품을 쓰는 레시피도 값이 나온다. */
+const priceless = id => { const v = buyPrice(id).v; return !isFinite(v) || !v; };
+const autoCraft = (id, depth) => !willCraft(id, depth) && canCraft(id) && priceless(id);
+const useCraft  = (id, depth) => willCraft(id, depth) || autoCraft(id, depth);
 
 /** 한 개당 원가를 재귀 계산하고 트리 노드를 채운다 */
 function unitCost(id, depth, stack, out){
   const rec = IX.get(id);
   if(!rec) return { cost: NaN, focus: 0, fame: 0, fee: 0 };
 
-  if(!willCraft(id, depth) || stack.has(id)){
+  if(!useCraft(id, depth) || stack.has(id)){
     const bp = buyPrice(id);
     return { cost: bp.v, focus: 0, fame: 0, fee: 0, buy: true };
   }
@@ -616,7 +622,7 @@ const CRAFT_KIND_BTN   = { ench:'인챈트', convert:'분해', transmute:'변환
                            combine:'조합', ritual:'의식', craft:'제작' };
 
 function treeRows(id, depth, qtyPer, seen, rows){
-  const craft = willCraft(id, depth) && !seen.has(id);
+  const craft = useCraft(id, depth) && !seen.has(id);
   const rec = IX.get(id);
   if(craft){
     const r = recipeOf(id);
@@ -625,8 +631,9 @@ function treeRows(id, depth, qtyPer, seen, rows){
     for(const [mid, cnt, nr] of r.m){
       const per  = (cnt / r.a) * qtyPer;
       const need = per * (noReturn(mid, nr) ? 1 : mult);
-      const sub  = willCraft(mid, depth + 1) && !seen.has(mid);
+      const sub  = useCraft(mid, depth + 1) && !seen.has(mid);
       rows.push({ id: mid, depth, per, need, craftable: canCraft(mid), crafting: sub,
+                  auto: sub && autoCraft(mid, depth + 1),
                   noret: noReturn(mid, nr), kind: craftKind(mid) });
       if(sub) treeRows(mid, depth + 1, need, seen, rows);
     }
@@ -635,9 +642,11 @@ function treeRows(id, depth, qtyPer, seen, rows){
   return rows;
 }
 
-function priceCell(id, crafting, unitCostVal){
+function priceCell(id, crafting, unitCostVal, auto){
   if(crafting){
     const k = craftKind(id), r = recipeOf(id);
+    if(auto) return `<span class="mut">${fmt(unitCostVal)}</span> <span class="tag craft">${
+      CRAFT_KIND_LABEL[k] || '직접제작'}</span> <span class="tag stale">시세 없어 제작</span>`;
     // 변환은 재료값보다 은화 수수료가 본체라 금액을 같이 적어 준다
     const silver = k === 'transmute' && r && r.s ? ` <span class="tag">은화 ${fmt(r.s / r.a)}</span>` : '';
     return `<span class="mut">${fmt(unitCostVal)}</span> <span class="tag craft">${
@@ -704,13 +713,28 @@ function renderResult(){
     </div>
   </div>
 
-  ${recs.length > 1 ? `<div class="cfg" style="padding:8px 12px">
-    <h3 style="margin-bottom:6px">레시피 선택</h3>
+  ${recs.length > 1 ? (() => {
+    // 각 경로의 개당 원가를 실제로 계산해 나란히 보여준다.
+    // 인챈트된 재료로 처음부터 만드는 길과 룬으로 한 단계 올리는 길을 바로 비교하려는 것.
+    const keep = recipePick.get(sel);
+    const costs = recs.map((r,i) => {
+      recipePick.set(sel, i);
+      return unitCost(sel, 0, new Set(), []).cost;
+    });
+    keep === undefined ? recipePick.delete(sel) : recipePick.set(sel, keep);
+    const valid = costs.filter(isFinite);
+    const best  = valid.length ? Math.min(...valid) : NaN;
+    return `<div class="cfg" style="padding:8px 12px">
+    <h3 style="margin-bottom:6px">레시피 선택 <span class="mut" style="font-weight:400;letter-spacing:0">
+      — 경로별 개당 원가를 계산해 비교합니다</span></h3>
     ${recs.map((r,i) => `<button class="mini ${(recipePick.get(sel)??0)===i?'on':''}"
         data-recipe="${i}" style="margin:2px 4px 2px 0">${
         r.up ? '<span class="tag" style="margin:0 5px 0 0">인챈트</span>' : ''}${
-        r.m.map(([m,ct]) => `${esc(nameOf(m))}×${fmtQ(ct)}`).join(' + ')}</button>`).join('')}
-  </div>` : ''}
+        r.m.map(([m,ct]) => `${esc(nameOf(m))}×${fmtQ(ct)}`).join(' + ')
+        }<span class="tag ${costs[i] === best ? 'craft' : ''}">${
+          isFinite(costs[i]) ? fmt(costs[i]) + (costs[i] === best && valid.length > 1 ? ' 최저' : '') : '시세 부족'
+        }</span></button>`).join('')}
+  </div>`; })() : ''}
 
   <div class="cards">
     <div class="card"><div class="k">개당 원가</div>
@@ -771,7 +795,7 @@ function renderResult(){
         </div></td>
         <td>${fmtQ(r.per)}</td>
         <td>${fmtQ(r.need)}</td>
-        <td>${priceCell(r.id, r.crafting, u)}</td>
+        <td>${priceCell(r.id, r.crafting, u, r.auto)}</td>
         <td>${fmtQ(r.need * c.qty)}</td>
         <td>${isFinite(u) ? fmt(u * r.need * c.qty) : '—'}</td>
         <td style="text-align:center">${r.craftable

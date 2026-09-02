@@ -209,7 +209,7 @@ const CITIES = [
   ['Caerleon','카를레온'], ['Brecilien','브레실리엔'],
 ];
 const BLACK_MARKET = 'Black Market';
-/* 암시장은 카를레온에만 있고, 구매 주문만 존재한다 — 판매처로만 고를 수 있다 */
+/* 암시장은 카를레온에만 있다. 판매처로만 고를 수 있고, 장비류만 거래된다 */
 const SELL_CITIES = [...CITIES, [BLACK_MARKET, '암시장 (카를레온)']];
 const CITY_KO = Object.fromEntries(SELL_CITIES);
 const isBM = c => c === BLACK_MARKET;
@@ -235,6 +235,10 @@ const CRAFT_CITY = {
 };
 const isRefineCat = cc => cc in REFINE_CITY;
 const bonusCityOf = r => REFINE_CITY[r.cc] || CRAFT_CITY[r.cc] || null;
+
+/* 분해·전환 레시피: 재료 1종을 넣어 여러 개로 쪼개는 고정 변환 (집중을 쓰지 않는다)
+   상위 티어 연금 재료 분해, 물고기 손질 등. 고정 변환이라 자원 반환이 붙지 않는다. */
+const isConvert = r => !!r && r.m.length === 1 && r.a > 1 && r.f === 0;
 
 /* 자원 반환이 적용되지 않는 재료 (아티팩트 · 토큰 · 퀘스트템) */
 const noReturn = id => id.includes('ARTEFACT') || id.includes('TOKEN') ||
@@ -287,6 +291,11 @@ let fetching = false, lastFetch = null;
 const fmt  = n => !isFinite(n) ? '—' : Math.round(n).toLocaleString('ko-KR');
 const fmt1 = n => !isFinite(n) ? '—' : n.toLocaleString('ko-KR',{maximumFractionDigits:1});
 const pct  = n => !isFinite(n) ? '—' : (n*100).toFixed(1) + '%';
+/* 수량 표기 — 1 미만이면 유효숫자를 살려 0 으로 뭉개지지 않게 한다 */
+const fmtQ = n => !isFinite(n) ? '—' : n === 0 ? '0'
+  : Math.abs(n) >= 100 ? Math.round(n).toLocaleString('ko-KR')
+  : Math.abs(n) >= 1   ? n.toLocaleString('ko-KR', {maximumFractionDigits: 2})
+  :                      n.toLocaleString('ko-KR', {maximumSignificantDigits: 2});
 const esc  = s => String(s).replace(/[&<>"]/g, c =>
                   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const icon = (id, sz=64) =>
@@ -352,12 +361,12 @@ function sellPrice(id){
   if(override.has('SELL:' + id)) return { v: +override.get('SELL:' + id), src: 'manual' };
   const p = rawPrice(id, cfg.sellCity, cfg.quality) || rawPrice(id, cfg.sellCity, 1);
   if(!p) return { v: NaN, src: 'none' };
-  const instant = isBM(cfg.sellCity) || cfg.sellMode === 'instant';
+  const instant = cfg.sellMode === 'instant';
   return { v: (instant ? p.b : p.s) || NaN,
            src: instant ? 'instant' : 'order', date: instant ? p.bd : p.sd };
 }
 const salesTax = () => cfg.premium ? 0.04 : 0.08;
-const setupFee = () => (cfg.sellMode === 'order' && !isBM(cfg.sellCity)) ? 0.025 : 0;
+const setupFee = () => cfg.sellMode === 'order' ? 0.025 : 0;
 
 /* ══ 원가 엔진 ══════════════════════════════════════════════════ */
 function recipeOf(id){
@@ -380,7 +389,7 @@ function unitCost(id, depth, stack, out){
   }
   const r = recipeOf(id);
   stack.add(id);
-  const mult = matMult(rec);
+  const mult = isConvert(r) ? 1 : matMult(rec);
   let mats = 0, focus = 0, fame = 0, fee = 0;
   const kids = [];
   for(const [mid, cnt] of r.m){
@@ -560,17 +569,16 @@ function cfgPanel(rec){
           <button data-v="order"   class="${cfg.buyMode==='order'?'on':''}">구매 주문</button>
         </div></div>
       <div class="field"><label>완제품 판매 방식</label>
-        ${bm ? `<div class="seg"><button class="on" disabled>암시장 구매주문에 판매</button></div>`
-             : `<div class="seg" data-seg="sellMode">
+        <div class="seg" data-seg="sellMode">
           <button data-v="order"   class="${cfg.sellMode==='order'?'on':''}">판매 주문</button>
           <button data-v="instant" class="${cfg.sellMode==='instant'?'on':''}">즉시 판매</button>
-        </div>`}</div>
+        </div></div>
       ${bc ? `<div class="status">이 아이템의 보너스 도시: <b>${CITY_KO[bc]}</b>
               (${isRefineCat(rec.cc)?'정제 +40%':'제작 +15%'})</div>`
            : `<div class="status">이 아이템은 도시 특화 보너스가 없습니다</div>`}
       ${bm ? `<div class="status">${BM_SELLS(rec)
-          ? '암시장은 <b>구매 주문만</b> 있어 등록비 없이 즉시 판매만 됩니다. 품질별로 가격이 크게 갈리니 품질 설정을 확인하세요.'
-          : '<b class="stale">암시장은 장비류만 매입합니다</b> — 이 아이템은 거래되지 않습니다.'}</div>` : ''}
+          ? '암시장은 품질별 가격 차이가 큽니다 — 품질 설정을 확인하세요.'
+          : '<b class="stale">암시장에서는 장비류만 거래됩니다</b> — 이 아이템은 시세가 잡히지 않습니다.'}</div>` : ''}
     </div>
   </div>`;
 }
@@ -581,13 +589,14 @@ function treeRows(id, depth, qtyPer, seen, rows){
   const rec = IX.get(id);
   if(craft){
     const r = recipeOf(id);
-    const mult = matMult(rec);
+    const mult = isConvert(r) ? 1 : matMult(rec);
     seen.add(id);
     for(const [mid, cnt] of r.m){
       const per  = (cnt / r.a) * qtyPer;
       const need = per * (noReturn(mid) ? 1 : mult);
       const sub  = willCraft(mid, depth + 1) && !seen.has(mid);
-      rows.push({ id: mid, depth, per, need, craftable: canCraft(mid), crafting: sub });
+      rows.push({ id: mid, depth, per, need, craftable: canCraft(mid), crafting: sub,
+                  convert: isConvert(recipeOf(mid)) });
       if(sub) treeRows(mid, depth + 1, need, seen, rows);
     }
     seen.delete(id);
@@ -596,7 +605,8 @@ function treeRows(id, depth, qtyPer, seen, rows){
 }
 
 function priceCell(id, crafting, unitCostVal){
-  if(crafting) return `<span class="mut">${fmt(unitCostVal)}</span> <span class="tag craft">직접제작</span>`;
+  if(crafting) return `<span class="mut">${fmt(unitCostVal)}</span> <span class="tag craft">${
+    isConvert(recipeOf(id)) ? '분해' : '직접제작'}</span>`;
   const bp = buyPrice(id);
   if(bp.src === 'manual')
     return `${fmt(bp.v)} <span class="tag">수동</span>`;
@@ -647,8 +657,10 @@ function renderResult(){
       <div class="badges">
         <span class="badge">${tierLabel(rec)}</span>
         ${bc ? `<span class="badge">보너스 도시 ${CITY_KO[bc]}</span>` : ''}
-        <span class="badge">반환율 ${pct(c.rr)} (보너스 합 ${fmt1(c.b*100)}%)</span>
-        <span class="badge">1회 제작 ${fmt1(recipeOf(sel).a)}개</span>
+        ${isConvert(recipeOf(sel))
+          ? `<span class="badge">분해 — 자원 반환 없음</span>`
+          : `<span class="badge">반환율 ${pct(c.rr)} (보너스 합 ${fmt1(c.b*100)}%)</span>`}
+        <span class="badge">1회 ${fmtQ(recipeOf(sel).a)}개 산출</span>
         ${recs.length > 1 ? `<span class="badge">레시피 ${recs.length}종</span>` : ''}
       </div>
     </div>
@@ -658,7 +670,7 @@ function renderResult(){
     <h3 style="margin-bottom:6px">레시피 선택</h3>
     ${recs.map((r,i) => `<button class="mini ${(recipePick.get(sel)??0)===i?'on':''}"
         data-recipe="${i}" style="margin:2px 4px 2px 0">${
-        r.m.map(([m,ct]) => `${esc(nameOf(m))}×${fmt1(ct)}`).join(' + ')}</button>`).join('')}
+        r.m.map(([m,ct]) => `${esc(nameOf(m))}×${fmtQ(ct)}`).join(' + ')}</button>`).join('')}
   </div>` : ''}
 
   <div class="cards">
@@ -667,8 +679,7 @@ function renderResult(){
       <div class="n">재료 + 수수료</div></div>
     <div class="card"><div class="k">개당 판매가</div>
       <div class="v">${noSell ? '<span class="stale">시세 없음</span>' : fmt(c.sellUnit)}</div>
-      <div class="n">${CITY_KO[cfg.sellCity]} · ${
-        isBM(cfg.sellCity) ? '구매주문 매입가' : cfg.sellMode==='order'?'판매 주문':'즉시 판매'}${
+      <div class="n">${CITY_KO[cfg.sellCity]} · ${cfg.sellMode==='order'?'판매 주문':'즉시 판매'}${
         c.sp.date ? ' · ' + ago(c.sp.date) : ''}</div></div>
     <div class="card"><div class="k">개당 순이익</div>
       <div class="v ${profitCls}">${noSell ? '—' : fmt(c.profit / c.qty)}</div>
@@ -697,7 +708,7 @@ function renderResult(){
   </div>
 
   <div class="sec">재료 내역 <span class="mut" style="font-weight:400;letter-spacing:0">
-    완제품 1개 기준 · 반환율 ${pct(c.rr)} 적용</span></div>
+    완제품 1개 기준 · 반환율 ${pct(c.rr)} 적용 (분해 단계는 반환 없음)</span></div>
   <div style="display:flex;gap:6px;margin-bottom:6px">
     <button class="mini" data-bulk="craft">하위 재료 전부 직접 제작</button>
     <button class="mini" data-bulk="buy">전부 시장에서 구매</button>
@@ -718,14 +729,15 @@ function renderResult(){
             noReturn(r.id) ? '<span class="tag nr">반환없음</span>' : ''}</div>
             <div class="id">${esc(r.id)}</div></div>
         </div></td>
-        <td>${fmt1(r.per)}</td>
-        <td>${fmt1(r.need)}</td>
+        <td>${fmtQ(r.per)}</td>
+        <td>${fmtQ(r.need)}</td>
         <td>${priceCell(r.id, r.crafting, u)}</td>
-        <td>${fmt1(r.need * c.qty)}</td>
+        <td>${fmtQ(r.need * c.qty)}</td>
         <td>${isFinite(u) ? fmt(u * r.need * c.qty) : '—'}</td>
         <td style="text-align:center">${r.craftable
           ? `<button class="mini ${r.crafting?'on':''}" data-craft="${esc(r.id)}">${
-              r.crafting ? '제작 중' : '제작'}</button>`
+              r.convert ? (r.crafting ? '분해 중' : '분해')
+                        : (r.crafting ? '제작 중' : '제작')}</button>`
           : '<span class="mut">—</span>'}</td>
       </tr>`;
     }).join('')}
@@ -766,11 +778,12 @@ function renderResult(){
     <b>계산 방식</b> · 반환율 = B/(1+B), B = 도시 기본 18% + 특화(정제 40% / 제작 15%)
     + 집중 59% + 일일·추가 보너스. 실소모 재료 = 기본 소모 ÷ (1+B).
     아티팩트·토큰은 반환되지 않습니다.<br>
+    <b>분해</b> · 상위 연금 재료를 하위로 쪼개거나 물고기를 손질하는 고정 변환입니다.
+    집중을 쓰지 않고 자원 반환도 붙지 않아, 투입한 재료가 그대로 소모됩니다.<br>
     <b>제작소 사용료</b> · 아이템 가치 × 0.1125 × (사용료 ÷ 100). 아이템 가치는 게임 데이터의
     itemvalue, 없으면 재료 가치 합에서 유도합니다.<br>
     <b>세금</b> · 판매세 ${cfg.premium?'4% (프리미엄)':'8% (비프리미엄)'}${
-      setupFee()?' + 판매 주문 등록비 2.5%':''}${
-      isBM(cfg.sellCity)?' (암시장은 등록비 없음)':''}.<br>
+      setupFee()?' + 판매 주문 등록비 2.5%':''}.<br>
     <b>명성</b>은 소모 재료의 famevalue 합으로 계산한 추정치입니다.<br>
     데이터: <a href="https://github.com/ao-data/ao-bin-dumps" target="_blank" rel="noopener">ao-bin-dumps</a>
     (${DATA.meta.generated} 기준, ${fmt(DATA.meta.count)}종) ·

@@ -141,6 +141,8 @@ td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
 .tag.craft{background:#2b3a2f;color:var(--up)}
 .tag.nr{background:#3a2b2b;color:var(--dn)}
 .stale{color:var(--warn)}
+.tag.alt{background:#2a3550;color:#8fb4e8}
+.alt2{color:#8fb4e8}
 .mini{background:none;border:1px solid var(--line);border-radius:4px;padding:1px 7px;font-size:10.5px;color:var(--tx2)}
 .mini:hover{border-color:var(--acc);color:var(--acc2)}
 .mini.on{background:var(--acc);border-color:var(--acc);color:#1a1408;font-weight:700}
@@ -279,6 +281,7 @@ const DEF = {
   station:'bonus',        // island | city | bonus | hideout
   focus:false, fce:0, daily:0, extra:0,
   premium:true, sellMode:'order',   // order | instant
+  crossCity:true,                   // 고른 도시에 시세가 없으면 다른 도시 값으로 대체
   buyMode:'instant',                // instant | order
   fee:800, qty:100, quality:1,
 };
@@ -407,26 +410,53 @@ const returnRate = rec => { const b = bonusSum(rec); return b / (1 + b); };
 const matMult    = rec => 1 / (1 + bonusSum(rec));   // 실제 소모 배수
 const focusMult  = () => Math.pow(0.5, (cfg.fce || 0) / 10000);
 
-/* ══ 가격 ═══════════════════════════════════════════════════════ */
+/* ══ 가격 ═══════════════════════════════════════════════════════
+   시세는 모든 도시를 한 번에 받아 둔다. 한 도시만 보면 아시아 서버에서는
+   T5 무기 80종 중 19종밖에 값이 안 잡히는데, 전 도시를 보면 61종이 잡힌다
+   (요청 수는 그대로고 전송량만 6KB → 27KB 늘어난다).
+   고른 도시에 값이 없으면 다른 도시 값으로 대신하고 어디 값인지 표시한다. */
+const PRICE_CITIES = [...CITIES.map(c => c[0]), BLACK_MARKET];
+
 function rawPrice(id, city, q = 1){
   return prices.get(pkey(id, city, q)) || null;
+}
+/** 값이 있는 도시 중 가장 싼(재료) / 가장 비싼(완제품) 곳을 찾는다 */
+function bestCity(id, q, field, cheapest){
+  let best = null;
+  for(const c of CITIES.map(x => x[0])){        // 암시장은 대체 대상에서 뺀다
+    const p = rawPrice(id, c, q) || (q !== 1 ? rawPrice(id, c, 1) : null);
+    const v = p && p[field];
+    if(!v) continue;
+    if(!best || (cheapest ? v < best.v : v > best.v)) best = { v, city: c, p };
+  }
+  return best;
 }
 /** 재료 매입가 */
 function buyPrice(id){
   if(override.has(id)) return { v: +override.get(id), src: 'manual' };
+  const field = cfg.buyMode === 'instant' ? 's' : 'b';
+  const dfield = cfg.buyMode === 'instant' ? 'sd' : 'bd';
   const p = rawPrice(id, cfg.buyCity, 1);
-  if(!p) return { v: NaN, src: 'none' };
-  const v = cfg.buyMode === 'instant' ? p.s : p.b;
-  return { v: v || NaN, src: cfg.buyMode, date: cfg.buyMode === 'instant' ? p.sd : p.bd };
+  if(p && p[field])
+    return { v: p[field], src: cfg.buyMode, date: p[dfield], city: cfg.buyCity };
+  if(!cfg.crossCity) return { v: NaN, src: 'none' };
+  const alt = bestCity(id, 1, field, true);          // 가장 싼 도시
+  if(!alt) return { v: NaN, src: 'none' };
+  return { v: alt.v, src: cfg.buyMode, date: alt.p[dfield], city: alt.city, alt: true };
 }
 /** 완제품 판매가 */
 function sellPrice(id){
   if(override.has('SELL:' + id)) return { v: +override.get('SELL:' + id), src: 'manual' };
-  const p = rawPrice(id, cfg.sellCity, cfg.quality) || rawPrice(id, cfg.sellCity, 1);
-  if(!p) return { v: NaN, src: 'none' };
   const instant = cfg.sellMode === 'instant';
-  return { v: (instant ? p.b : p.s) || NaN,
-           src: instant ? 'instant' : 'order', date: instant ? p.bd : p.sd };
+  const field = instant ? 'b' : 's', dfield = instant ? 'bd' : 'sd';
+  const p = rawPrice(id, cfg.sellCity, cfg.quality) || rawPrice(id, cfg.sellCity, 1);
+  if(p && p[field])
+    return { v: p[field], src: cfg.sellMode, date: p[dfield], city: cfg.sellCity };
+  // 암시장은 가격 성격이 달라 royal 도시로 대체하지 않는다
+  if(!cfg.crossCity || isBM(cfg.sellCity)) return { v: NaN, src: 'none' };
+  const alt = bestCity(id, +cfg.quality, field, false);   // 가장 비싼 도시
+  if(!alt) return { v: NaN, src: 'none' };
+  return { v: alt.v, src: cfg.sellMode, date: alt.p[dfield], city: alt.city, alt: true };
 }
 const salesTax = () => cfg.premium ? 0.04 : 0.08;
 const setupFee = () => cfg.sellMode === 'order' ? 0.025 : 0;
@@ -544,7 +574,7 @@ async function fetchPrices(){
   fetching = true;
   setStatus('시세 불러오는 중…');
   const ids    = neededIds();
-  const cities = [...new Set([cfg.buyCity, cfg.sellCity])];
+  const cities = PRICE_CITIES;
   let got = 0, err = null;
   try{
     got = await loadPrices(ids, cities, [1,2,3,4,5]);
@@ -651,7 +681,7 @@ async function runScan(){
   renderScan();
   try{
     const ids    = scanIds(cands.map(r => r.id));
-    const cities = [...new Set([cfg.buyCity, cfg.sellCity])];
+    const cities = PRICE_CITIES;
     const quals  = [...new Set([1, +cfg.quality])];
     await loadPrices(ids, cities, quals, (done, all) => {
       scanInfo = `시세 ${fmt(done)}/${fmt(all)}종 조회 중…`;
@@ -814,6 +844,8 @@ function cfgPanel(rec){
     <div class="cfgrow">
       <label class="chk"><input type="checkbox" data-cfg="focus" ${cfg.focus?'checked':''}>집중 사용 (+59%)</label>
       <label class="chk"><input type="checkbox" data-cfg="premium" ${cfg.premium?'checked':''}>프리미엄 (판매세 4%)</label>
+      <label class="chk" title="고른 도시에 시세가 없으면 값이 있는 다른 도시 시세로 대신합니다"><input
+        type="checkbox" data-cfg="crossCity" ${cfg.crossCity?'checked':''}>다른 도시 시세로 대체</label>
       <div class="field"><label>재료 매입 방식</label>
         <div class="seg" data-seg="buyMode">
           <button data-v="instant" class="${cfg.buyMode==='instant'?'on':''}">즉시 구매</button>
@@ -889,6 +921,7 @@ function priceCell(id, crafting, unitCostVal, auto){
     return `${fmt(bp.v)} <span class="tag">수동</span>`;
   if(!isFinite(bp.v) || !bp.v)
     return `<span class="stale">시세 없음</span>`;
+  const cityTag = bp.alt ? ` <span class="tag alt">${esc(CITY_KO[bp.city])}</span>` : '';
   const h = staleH(bp.date);
   const hi = hist7(id, cfg.buyCity, 1);
   let dev = '';
@@ -897,7 +930,8 @@ function priceCell(id, crafting, unitCostVal, auto){
     if(Math.abs(d) >= 0.3)
       dev = ` <span class="tag stale">평균比 ${d > 0 ? '+' : ''}${(d*100).toFixed(0)}%</span>`;
   }
-  return `${fmt(bp.v)}${h > 24 ? ` <span class="tag stale">${ago(bp.date)}</span>` : ''}${dev}`;
+  return `${fmt(bp.v)}${cityTag}${
+    h > 24 ? ` <span class="tag stale">${ago(bp.date)}</span>` : ''}${dev}`;
 }
 
 /* 트리 안의 각 아이템 1개당 원가 (표시용) */
@@ -964,7 +998,9 @@ function renderScan(){
         <td>${fmt(x.matCost)}</td>
         <td>${fmt(x.fee)}</td>
         <td>${fmt(x.cost)}</td>
-        <td>${fmt(x.sell)}${x.sp.date && staleH(x.sp.date) > 24
+        <td>${fmt(x.sell)}${x.sp.alt
+              ? `<div class="alt2" style="font-size:10px">${esc(CITY_KO[x.sp.city])}</div>` : ''}${
+              x.sp.date && staleH(x.sp.date) > 24
               ? `<div class="mut" style="font-size:10px">${ago(x.sp.date)}</div>` : ''}</td>
         <td>${dev === null ? '<span class="stale">기록 없음</span>'
               : `${fmt(h.avg)}<div class="${spike ? 'stale' : 'mut'}" style="font-size:10px">${
@@ -1069,7 +1105,9 @@ function renderResult(){
       <div class="n">재료 + 수수료</div></div>
     <div class="card"><div class="k">개당 판매가</div>
       <div class="v">${noSell ? '<span class="stale">시세 없음</span>' : fmt(c.sellUnit)}</div>
-      <div class="n">${CITY_KO[cfg.sellCity]} · ${cfg.sellMode==='order'?'판매 주문':'즉시 판매'}${
+      <div class="n">${CITY_KO[c.sp.city || cfg.sellCity]}${
+        c.sp.alt ? ' <span class="tag alt">다른 도시</span>' : ''} · ${
+        cfg.sellMode==='order'?'판매 주문':'즉시 판매'}${
         c.sp.date ? ' · ' + ago(c.sp.date) : ''}${(() => {
         const h = hist7(sel, cfg.sellCity, +cfg.quality);
         return h && isFinite(h.avg) ? `<br>7일 평균 ${fmt(h.avg)}` : '';
@@ -1194,6 +1232,10 @@ function renderResult(){
     <b>세금</b> · 판매세 ${cfg.premium?'4% (프리미엄)':'8% (비프리미엄)'}${
       setupFee()?' + 판매 주문 등록비 2.5%':''}.<br>
     <b>명성</b>은 소모 재료의 famevalue 합으로 계산한 추정치입니다.<br>
+    <b>다른 도시 시세로 대체</b> · 고른 도시에 값이 없으면 값이 있는 도시 중
+    재료는 가장 싼 곳, 완제품은 가장 비싼 곳 시세를 대신 씁니다. 그 경우
+    <span class="tag alt">도시명</span> 이 붙습니다 — 실제로 사고팔려면 그 도시로 옮겨야 합니다.
+    암시장은 가격 성격이 달라 대체 대상에서 뺐습니다.<br>
     <b>7일 평균·거래량</b> · 시세 추이 API(24시간 집계)의 최근 7일을 거래량 가중 평균한 값입니다.
     현재가가 평균에서 30% 이상 벗어나면 <span class="tag stale">평균比</span> 표시가 붙습니다.<br>
     데이터: <a href="https://github.com/ao-data/ao-bin-dumps" target="_blank" rel="noopener">ao-bin-dumps</a>

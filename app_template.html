@@ -213,9 +213,12 @@ const CITIES = [
 ];
 const BLACK_MARKET = 'Black Market';
 /* 암시장은 카를레온에만 있다. 판매처로만 고를 수 있고, 장비류만 거래된다 */
-const SELL_CITIES = [...CITIES, [BLACK_MARKET, '암시장 (카를레온)']];
+const AUTO_VENUE = 'AUTO';
+const SELL_CITIES = [[AUTO_VENUE, '자동 — 최고 실수령'], ...CITIES,
+                     [BLACK_MARKET, '암시장 (카를레온)']];
 const CITY_KO = Object.fromEntries(SELL_CITIES);
 const isBM = c => c === BLACK_MARKET;
+const isAuto = () => cfg.sellCity === AUTO_VENUE;
 /* 암시장이 사들이는 것은 장비류뿐 */
 const BM_SELLS = r => ['weapons','offhands','armors','head','shoes','bags','capes','artefacts']
   .includes(r.sc);
@@ -282,6 +285,7 @@ const DEF = {
   focus:false, fce:0, daily:0, extra:0,
   premium:true, sellMode:'order',   // order | instant
   crossCity:true,                   // 고른 도시에 시세가 없으면 다른 도시 값으로 대체
+  minVol:0, maxDev:0, minProfit:0,  // 탐색 임계값 (거래량·평균比 이탈·개당 이익)
   buyMode:'instant',                // instant | order
   fee:800, qty:100, quality:1,
 };
@@ -444,22 +448,56 @@ function buyPrice(id){
   if(!alt) return { v: NaN, src: 'none' };
   return { v: alt.v, src: cfg.buyMode, date: alt.p[dfield], city: alt.city, alt: true };
 }
-/** 완제품 판매가 */
+/** 완제품 판매가 — v 는 표시가, net 은 세후 실수령 */
 function sellPrice(id){
-  if(override.has('SELL:' + id)) return { v: +override.get('SELL:' + id), src: 'manual' };
+  if(override.has('SELL:' + id)){
+    const v = +override.get('SELL:' + id);
+    return { v, net: netOf(v, cfg.sellMode), src:'manual',
+             city: isAuto() ? null : cfg.sellCity, mode: cfg.sellMode };
+  }
+  // 자동: 실수령이 가장 큰 (도시 × 판매방식) 을 고른다
+  if(isAuto()){
+    const opts = venueOptions(id);
+    if(!opts.length) return { v: NaN, net: NaN, src:'none' };
+    const best = opts.reduce((a, b) => b.net > a.net ? b : a);
+    return { ...best, src: best.mode, auto: true };
+  }
   const instant = cfg.sellMode === 'instant';
   const field = instant ? 'b' : 's', dfield = instant ? 'bd' : 'sd';
   const p = rawPrice(id, cfg.sellCity, cfg.quality) || rawPrice(id, cfg.sellCity, 1);
   if(p && p[field])
-    return { v: p[field], src: cfg.sellMode, date: p[dfield], city: cfg.sellCity };
+    return { v: p[field], net: netOf(p[field], cfg.sellMode), src: cfg.sellMode,
+             date: p[dfield], city: cfg.sellCity, mode: cfg.sellMode };
   // 암시장은 가격 성격이 달라 royal 도시로 대체하지 않는다
-  if(!cfg.crossCity || isBM(cfg.sellCity)) return { v: NaN, src: 'none' };
+  if(!cfg.crossCity || isBM(cfg.sellCity)) return { v: NaN, net: NaN, src:'none' };
   const alt = bestCity(id, +cfg.quality, field, false);   // 가장 비싼 도시
-  if(!alt) return { v: NaN, src: 'none' };
-  return { v: alt.v, src: cfg.sellMode, date: alt.p[dfield], city: alt.city, alt: true };
+  if(!alt) return { v: NaN, net: NaN, src:'none' };
+  return { v: alt.v, net: netOf(alt.v, cfg.sellMode), src: cfg.sellMode,
+           date: alt.p[dfield], city: alt.city, mode: cfg.sellMode, alt: true };
 }
 const salesTax = () => cfg.premium ? 0.04 : 0.08;
-const setupFee = () => cfg.sellMode === 'order' ? 0.025 : 0;
+const feeOf    = mode => mode === 'order' ? 0.025 : 0;   // 판매 주문 등록비
+const setupFee = () => feeOf(cfg.sellMode);
+/** 표시가 → 세금·등록비를 뺀 실수령 */
+const netOf = (gross, mode) => gross * (1 - salesTax() - feeOf(mode));
+
+/** 팔 수 있는 모든 (도시 × 판매방식) 후보와 각각의 실수령 */
+function venueOptions(id){
+  const rec = IX.get(id);
+  const q = +cfg.quality;
+  const out = [];
+  const add = (city, p) => {
+    if(!p) return;
+    if(p.s) out.push({ city, mode:'order',   v:p.s, net:netOf(p.s,'order'),   date:p.sd });
+    if(p.b) out.push({ city, mode:'instant', v:p.b, net:netOf(p.b,'instant'), date:p.bd });
+  };
+  for(const c of CITIES.map(x => x[0]))
+    add(c, rawPrice(id, c, q) || rawPrice(id, c, 1));
+  // 암시장은 장비류만 거래된다
+  if(rec && BM_SELLS(rec))
+    add(BLACK_MARKET, rawPrice(id, BLACK_MARKET, q) || rawPrice(id, BLACK_MARKET, 1));
+  return out;
+}
 
 /* ══ 원가 엔진 ══════════════════════════════════════════════════ */
 function recipeOf(id){
@@ -521,10 +559,10 @@ function calc(){
   const u = unitCost(sel, 0, new Set(), nodes);
   const qty = cfg.qty || 1;
 
-  const sp   = sellPrice(sel);
+  const sp    = sellPrice(sel);
   const gross = sp.v * qty;
-  const tax   = gross * (salesTax() + setupFee());
-  const net   = gross - tax;
+  const net   = sp.net * qty;
+  const tax   = gross - net;
   const cost  = u.cost * qty;
   const profit = net - cost;
 
@@ -633,7 +671,7 @@ let scanSort = 'profit';   // profit | margin | vol | safe
 /** 결과 정렬 — 거래량과 '7일 평균 대비' 는 이익률만큼이나 중요한 판단 재료다 */
 function scanSorted(){
   if(!scanRows) return [];
-  const h = x => hist7(x.id, cfg.sellCity, +cfg.quality);
+  const h = x => hist7(x.id, x.sp.city || cfg.sellCity, +cfg.quality);
   const vol = x => { const g = h(x); return g && isFinite(g.vol) ? g.vol : -1; };
   const dev = x => {
     const g = h(x);
@@ -642,6 +680,8 @@ function scanSorted(){
   };
   const rows = [...scanRows];
   if(scanSort === 'margin') rows.sort((a,b) => b.margin - a.margin);
+  else if(scanSort === 'focus') rows.sort((a,b) =>
+    (isFinite(b.perFocus) ? b.perFocus : -Infinity) - (isFinite(a.perFocus) ? a.perFocus : -Infinity));
   else if(scanSort === 'vol') rows.sort((a,b) => vol(b) - vol(a));
   else if(scanSort === 'safe'){
     // 거래량이 있고 현재가가 평균에서 덜 벗어난 것부터 — 튄 주문에 속지 않도록
@@ -700,8 +740,7 @@ async function runScan(){
       const sp = sellPrice(rec.id);
       if(!isFinite(u.cost) || u.cost <= 0) continue;
       if(!isFinite(sp.v) || !sp.v) continue;
-      const net    = sp.v * (1 - salesTax() - setupFee());
-      const profit = net - u.cost;
+      const profit = sp.net - u.cost;
       const mult   = matMult(rec);
       rows.push({
         id: rec.id, rec,
@@ -714,16 +753,38 @@ async function runScan(){
         fee: u.fee, cost: u.cost, sell: sp.v, sp,
         profit, margin: profit / u.cost,
         focus: u.focus,
+        perFocus: u.focus > 0 ? profit / u.focus : NaN,
       });
     }
     rows.sort((a, b) => b.profit - a.profit);
-    const win = rows.filter(x => x.profit > 0).slice(0, 60);
-    // 이긴 것만 거래량을 조회한다 (요청 1건이면 끝난다)
-    if(win.length) await fetchHistory(win.map(x => x.id), [cfg.sellCity], quals);
+    let pos = rows.filter(x => x.profit > 0 && x.profit >= (cfg.minProfit || 0));
+    // 거래량·평균比 판정에 필요한 추이는 상위권만 받는다 (요청 2건 이내)
+    const head = pos.slice(0, 150);
+    if(head.length){
+      const byCity = new Map();
+      for(const x of head){
+        const c = x.sp.city || cfg.sellCity;
+        if(!byCity.has(c)) byCity.set(c, []);
+        byCity.get(c).push(x.id);
+      }
+      for(const [c, list] of byCity) await fetchHistory(list, [c], quals);
+    }
+    let cut = 0;
+    const kept = head.filter(x => {
+      const h = hist7(x.id, x.sp.city || cfg.sellCity, +cfg.quality);
+      if(cfg.minVol > 0 && (!h || !isFinite(h.vol) || h.vol < cfg.minVol)){ cut++; return false; }
+      if(cfg.maxDev > 0){
+        if(!h || !isFinite(h.avg) || !h.avg){ cut++; return false; }
+        if(Math.abs(x.sell / h.avg - 1) * 100 > cfg.maxDev){ cut++; return false; }
+      }
+      return true;
+    });
+    const win = kept.slice(0, 60);
     scanRows = win;
-    scanInfo = `${fmt(cands.length)}종 중 이익 나는 ${fmt(win.length)}종` +
-               (rows.length > win.length ? ` · 적자 ${fmt(rows.length - win.length)}종 제외` : '') +
-               ` · 시세 없어 계산 못한 ${fmt(cands.length - rows.length)}종 제외`;
+    scanInfo = `${fmt(cands.length)}종 중 ${fmt(win.length)}종` +
+               ` · 적자 ${fmt(rows.length - pos.length)}종` +
+               (cut ? ` · 임계값 미달 ${fmt(cut)}종` : '') +
+               ` · 시세 없음 ${fmt(cands.length - rows.length)}종 제외`;
   }catch(e){
     scanInfo = `탐색 실패: ${e.message}`;
   }
@@ -854,10 +915,12 @@ function cfgPanel(rec){
           <button data-v="order"   class="${cfg.buyMode==='order'?'on':''}">구매 주문</button>
         </div></div>
       <div class="field"><label>완제품 판매 방식</label>
-        <div class="seg" data-seg="sellMode">
+        ${isAuto()
+          ? `<div class="seg"><button class="on" disabled>아이템별 자동 선택</button></div>`
+          : `<div class="seg" data-seg="sellMode">
           <button data-v="order"   class="${cfg.sellMode==='order'?'on':''}">판매 주문</button>
           <button data-v="instant" class="${cfg.sellMode==='instant'?'on':''}">즉시 판매</button>
-        </div></div>
+        </div>`}</div>
       ${bc ? `<div class="status">이 아이템의 보너스 도시: <b>${CITY_KO[bc]}</b>
               (${isRefineCat(rec.cc)?'정제 +40%':'제작 +15%'})</div>`
            : `<div class="status">이 아이템은 도시 특화 보너스가 없습니다</div>`}
@@ -955,9 +1018,22 @@ function renderScan(){
     <button class="btn" data-scanback="1">아이템 계산으로 돌아가기</button>
     <button class="btn pri" id="scan2" ${scanBusy ? 'disabled' : ''}>다시 탐색</button>
   </div>
+  <div class="cfg" style="padding:9px 12px;margin-bottom:10px">
+    <h3 style="margin-bottom:7px">걸러내기</h3>
+    <div class="cfgrid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">
+      <div class="field"><label>최소 일 거래량</label>
+        <input type="number" data-cfg="minVol" value="${cfg.minVol}" min="0" step="10"></div>
+      <div class="field"><label>7일 평균比 최대 이탈 %</label>
+        <input type="number" data-cfg="maxDev" value="${cfg.maxDev}" min="0" step="5"></div>
+      <div class="field"><label>최소 개당 이익</label>
+        <input type="number" data-cfg="minProfit" value="${cfg.minProfit}" min="0" step="1000"></div>
+    </div>
+    <div class="status" style="margin-top:7px">0 은 제한 없음. 값을 바꾸면 다시 탐색해야 반영됩니다.</div>
+  </div>
   ${scanRows && scanRows.length ? `<div style="display:flex;gap:6px;margin-bottom:8px;align-items:center">
     <span class="mut" style="font-size:11px">정렬</span>
-    ${[['profit','이익순'],['margin','이익률순'],['vol','거래량순'],['safe','안정성순']]
+    ${[['profit','이익순'],['margin','이익률순'],['focus','집중당 이익순'],
+       ['vol','거래량순'],['safe','안정성순']]
       .map(([v,k]) => `<button class="mini ${scanSort===v?'on':''}" data-sort="${v}">${k}</button>`).join('')}
   </div>` : ''}`;
 
@@ -977,11 +1053,12 @@ function renderScan(){
   <table>
     <thead><tr>
       <th>아이템</th><th>재료 (1개당 실소모)</th><th>재료비</th><th>수수료</th>
-      <th>개당 원가</th><th>판매가</th><th>7일 평균</th><th>개당 이익</th><th>이익률</th><th>일 거래량</th>
+      <th>개당 원가</th><th>판매처</th><th>판매가</th><th>7일 평균</th>
+      <th>개당 이익</th><th>이익률</th>${cfg.focus ? '<th>집중당</th>' : ''}<th>일 거래량</th>
     </tr></thead>
     <tbody>
     ${scanSorted().map(x => {
-      const h = hist7(x.id, cfg.sellCity, +cfg.quality);
+      const h = hist7(x.id, x.sp.city || cfg.sellCity, +cfg.quality);
       const thin = !h || !isFinite(h.vol) || h.vol < 20;
       const dev = h && isFinite(h.avg) && h.avg ? x.sell / h.avg - 1 : null;
       const spike = dev !== null && Math.abs(dev) >= 0.3;
@@ -1000,30 +1077,39 @@ function renderScan(){
         <td>${fmt(x.matCost)}</td>
         <td>${fmt(x.fee)}</td>
         <td>${fmt(x.cost)}</td>
-        <td>${fmt(x.sell)}${x.sp.alt
-              ? `<div class="alt2" style="font-size:10px">${esc(CITY_KO[x.sp.city])}</div>` : ''}${
-              x.sp.date && staleH(x.sp.date) > 24
+        <td style="text-align:left"><span class="${x.sp.auto || x.sp.alt ? 'alt2' : ''}">${
+              esc(CITY_KO[x.sp.city] || '—')}</span>
+          <div class="mut" style="font-size:10px">${
+              x.sp.mode === 'order' ? '판매 주문' : '즉시 판매'}</div></td>
+        <td>${fmt(x.sell)}${x.sp.date && staleH(x.sp.date) > 24
               ? `<div class="mut" style="font-size:10px">${ago(x.sp.date)}</div>` : ''}</td>
         <td>${dev === null ? '<span class="stale">기록 없음</span>'
               : `${fmt(h.avg)}<div class="${spike ? 'stale' : 'mut'}" style="font-size:10px">${
                   dev > 0 ? '+' : ''}${(dev*100).toFixed(0)}%</div>`}</td>
         <td class="up">+${fmt(x.profit)}</td>
         <td class="up">${pct(x.margin)}</td>
+        ${cfg.focus ? `<td class="${isFinite(x.perFocus) ? 'up' : 'mut'}">${
+            isFinite(x.perFocus) ? fmt1(x.perFocus) : '—'}</td>` : ''}
         <td class="${thin ? 'stale' : 'mut'}">${h && isFinite(h.vol) ? fmt(h.vol) : '—'}</td>
       </tr>`;
     }).join('')}
     </tbody>
   </table>
   <div class="note">
-    현재 설정(${CITY_KO[cfg.buyCity]}에서 재료 구매 · ${CITY_KO[cfg.sellCity]}에 
-    ${cfg.sellMode === 'order' ? '판매 주문' : '즉시 판매'} · 
+    현재 설정(${CITY_KO[cfg.buyCity]}에서 재료 구매 · ${
+      isAuto() ? '판매처 자동 선택' : CITY_KO[cfg.sellCity] + '에 ' +
+        (cfg.sellMode === 'order' ? '판매 주문' : '즉시 판매')} · 
     ${cfg.station === 'bonus' ? '보너스 도시' : cfg.station === 'island' ? '섬'
       : cfg.station === 'hideout' ? '은신처' : '일반 도시'}${cfg.focus ? ' · 집중 사용' : ''})
     기준입니다. 행을 누르면 그 아이템의 상세 계산으로 넘어갑니다.<br>
     <b>7일 평균 대비</b>가 크게 벌어져 있으면 지금 값이 튄 주문일 가능성이 높습니다.
     이익률이 아무리 높아도 그 주문 하나가 사라지면 그만입니다.
     <b>일 거래량</b>이 낮으면(20 미만, 색으로 표시) 만들어도 안 팔립니다.
-    <b>안정성순</b>은 거래량이 있으면서 평균에서 덜 벗어난 것부터 보여줍니다.<br>
+    <b>안정성순</b>은 거래량이 있으면서 평균에서 덜 벗어난 것부터 보여줍니다.
+    <b>집중당 이익순</b>은 집중을 쓸 때만 나오며, 하루 10,000 집중을 어디에
+    쓸지 고르는 기준입니다 — 이익률이 높아도 집중을 많이 먹으면 손해입니다.<br>
+    <b>판매처</b>가 파란색이면 자동 선택되거나 대체된 곳입니다. 세금·등록비를 뺀
+    실수령이 가장 큰 (도시 × 판매방식) 조합을 고릅니다.<br>
     재료는 시세가 있으면 사서 쓰고, 시세가 없는데 만들 수 있으면 제작 원가로 계산합니다.
   </div>`;
   hydrateIcons(main);
@@ -1110,9 +1196,10 @@ function renderResult(){
       <div class="n">재료 + 수수료</div></div>
     <div class="card"><div class="k">개당 판매가</div>
       <div class="v">${noSell ? '<span class="stale">시세 없음</span>' : fmt(c.sellUnit)}</div>
-      <div class="n">${CITY_KO[c.sp.city || cfg.sellCity]}${
-        c.sp.alt ? ' <span class="tag alt">다른 도시</span>' : ''} · ${
-        cfg.sellMode==='order'?'판매 주문':'즉시 판매'}${
+      <div class="n">${CITY_KO[c.sp.city || cfg.sellCity] || '—'}${
+        c.sp.auto ? ' <span class="tag alt">자동</span>'
+        : c.sp.alt ? ' <span class="tag alt">다른 도시</span>' : ''} · ${
+        (c.sp.mode || cfg.sellMode)==='order'?'판매 주문':'즉시 판매'}${
         c.sp.date ? ' · ' + ago(c.sp.date) : ''}${(() => {
         const h = hist7(sel, cfg.sellCity, +cfg.quality);
         return h && isFinite(h.avg) ? `<br>7일 평균 ${fmt(h.avg)}` : '';

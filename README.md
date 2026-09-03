@@ -24,6 +24,7 @@ Nendys 계산기와 같은 기능을 게임 공개 데이터로 새로 구현한
 | 원가 | 재료비 + 제작소 사용료(`아이템가치 × 0.1125 × 사용료/100`) |
 | 수익 | 판매세 4%(프리미엄)/8% + 판매주문 등록비 2.5% 반영, 이익률·집중 1당 이익 |
 | 시세 | 아시아/아메리카/유럽 서버, 도시별 판매주문·구매주문 가격, 데이터 나이 표시 |
+| 시세 추이 | 7일 거래량 가중 평균가와 일 거래량. 현재가가 평균에서 30% 이상 벗어나면 경고 |
 | 수동 입력 | 시세가 없거나 실제 거래가와 다를 때 재료·판매가를 직접 덮어쓰기 |
 
 ## 게임 패치 후 데이터 갱신
@@ -38,6 +39,8 @@ python3 build_data.py && python3 build_app.py
 
 * `build_data.py` — 게임 덤프에서 레시피·한글명·아이템가치를 뽑아 `albion_data.json` 생성
 * `build_app.py` — `app_template.html` 에 데이터를 넣어 완성본 HTML 빌드
+* `fetch_icons.py` — 아이콘을 `icons/` 로 미러링하는 스크립트. **지금은 쓰지 않는다** (핫링크로 충분).
+  쓰려면 실행 후 `app_template.html` 의 `icon()` 이 `icons/{id}.png` 를 가리키게 바꾼다
 * 반환율·세금 수치는 `app_template.html` 상단 `bonusSum()` / `salesTax()` 에 있습니다
 
 ## 배포
@@ -54,6 +57,6 @@ python3 build_data.py && python3 build_app.py
 
 * 아이템·레시피 데이터 — [ao-data/ao-bin-dumps](https://github.com/ao-data/ao-bin-dumps) (한국어 이름은 게임 공식 로컬라이제이션)
 * 시세 — [Albion Online Data Project](https://www.albion-online-data.com/)
-* 아이콘 — `render.albiononline.com` 공식 렌더 API
+* 아이콘 — `render.albiononline.com` 공식 렌더 API (핫링크)
 
 Sandbox Interactive GmbH 와 무관한 비공식 도구입니다.

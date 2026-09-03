@@ -255,6 +255,8 @@ const noReturn = (id, flag) => !!flag || id.includes('ARTEFACT') ||
                        id.includes('TOKEN') || id.startsWith('QUESTITEM');
 
 /* ── 카테고리 탭 ──────────────────────────────────────────────── */
+const LIST_MAX = 60;   // 목록에 한 번에 뿌리는 개수 (아이콘 요청이 밀리지 않는 선)
+
 const TABS = [
   ['refine', '정제·재료', r => r.sc === 'crafting' || r.sc === 'farming'],
   ['weapon', '무기',     r => r.sc === 'weapons' || r.sc === 'offhands' ||
@@ -295,6 +297,8 @@ const saveOvr   = () => localStorage.setItem('ao_ovr',
 /* ── 시세 캐시 ────────────────────────────────────────────────── */
 const prices = new Map();          // `${id}|${city}|${q}` -> {s,b,sd,bd}
 const pkey = (id, city, q) => `${id}|${city}|${q}`;
+/* 시세 추이 — 하루 단위 집계라 세션 동안 다시 받지 않는다 */
+const hist = new Map();            // `${id}|${city}|${q}` -> {avg, vol, days}
 let fetching = false, lastFetch = null;
 
 /* ══ 유틸 ═══════════════════════════════════════════════════════ */
@@ -308,15 +312,63 @@ const fmtQ = n => !isFinite(n) ? '—' : n === 0 ? '0'
   :                      n.toLocaleString('ko-KR', {maximumSignificantDigits: 2});
 const esc  = s => String(s).replace(/[&<>"]/g, c =>
                   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const icon = (id, sz=64) =>
-  `https://render.albiononline.com/v1/item/${encodeURIComponent(id)}.png?size=${sz}&quality=1`;
-/* 아이콘 서버가 간헐적으로 502 를 뱉으므로 한 번 재시도 후 자리만 남긴다 */
-window.imgFail = el => {
-  if(el.dataset.retry){ el.style.visibility = 'hidden'; return; }
-  el.dataset.retry = '1';
-  const src = el.src;
-  setTimeout(() => { el.src = src + '&r=1'; }, 1500 + Math.random() * 1500);
-};
+const icon = id =>
+  `https://render.albiononline.com/v1/item/${encodeURIComponent(id)}.png?size=64&quality=1`;
+/* ── 아이콘 로더 ────────────────────────────────────────────────
+   render.albiononline.com 은 동시 요청이 몰리면 대부분 502 로 죽는다
+   (동시 50건 중 48건 실패, 4건씩이면 24건 중 22건 성공).
+   그래서 4개씩만 큐로 흘려보내고 실패하면 간격을 늘려 재시도한다.
+   화면에 들어온 것만 요청하며, 응답에 max-age=86400 이 붙어 있어
+   한 번 성공하면 하루는 다시 받지 않는다. */
+const ICON_MAX = 4, ICON_TRIES = 5;
+let iconBusy = 0;
+const iconQueue = [];
+const iconDone  = new Set();
+
+function iconPump(){
+  while(iconBusy < ICON_MAX && iconQueue.length){
+    const job = iconQueue.shift();
+    const el = job.el;
+    if(!el.isConnected) continue;
+    iconBusy++;
+    const clear = () => { el.onload = el.onerror = null; iconBusy--; iconPump(); };
+    el.onload  = () => { iconDone.add(job.url); clear(); };
+    el.onerror = () => {
+      clear();
+      if(++job.n < ICON_TRIES){
+        setTimeout(() => { iconQueue.push(job); iconPump(); },
+                   700 * Math.pow(2, job.n) + Math.random() * 700);
+      } else {
+        el.style.visibility = 'hidden';
+      }
+    };
+    el.src = job.url;
+  }
+}
+function iconLoad(el){
+  const id = el.dataset.ico;
+  if(!id || el.src) return;
+  const url = icon(id);
+  if(iconDone.has(url)){ el.src = url; return; }   // 캐시에 있으면 즉시
+  iconQueue.push({ el, id, url, n: 0 });
+  iconPump();
+}
+const iconObs = 'IntersectionObserver' in window
+  ? new IntersectionObserver(es => {
+      for(const e of es){
+        if(!e.isIntersecting) continue;
+        iconObs.unobserve(e.target);
+        iconLoad(e.target);
+      }
+    }, { rootMargin: '250px' })
+  : null;
+/* 다시 그린 뒤 화면에 들어온 아이콘만 큐에 넣는다 */
+function hydrateIcons(root){
+  for(const el of (root || document).querySelectorAll('img[data-ico]')){
+    if(el.src) continue;
+    iconObs ? iconObs.observe(el) : iconLoad(el);
+  }
+}
 
 function nameOf(id){
   const r = IX.get(id);
@@ -487,12 +539,47 @@ async function fetchPrices(){
       }
     }
     lastFetch = new Date();
+    await fetchHistory(ids, cities, [...new Set([1, +cfg.quality])]);
   }catch(e){ err = e.message; }
   fetching = false;
   setStatus(err ? `시세 조회 실패: ${err}`
                 : `${ids.length}종 · ${got}건 · ${lastFetch.toLocaleTimeString('ko-KR')} 갱신`);
   document.getElementById('result') ? renderResult() : render();
 }
+/** 7일 평균가와 일 거래량 — 현재가가 튄 값인지, 실제로 팔릴 물량인지 판단용 */
+async function fetchHistory(ids, cities, qualities){
+  const want = [];
+  for(const id of ids)
+    if(!cities.every(c => qualities.every(q => hist.has(pkey(id, c, q))))) want.push(id);
+  if(!want.length) return;
+  const base = `https://${cfg.server}.albion-online-data.com/api/v2/stats/history/`;
+  const qs = `?locations=${cities.map(encodeURIComponent).join(',')}` +
+             `&qualities=${qualities.join(',')}&time-scale=24`;
+  try{
+    for(let i = 0; i < want.length; i += 90){
+      const chunk = want.slice(i, i + 90).map(encodeURIComponent).join(',');
+      const res = await fetch(base + chunk + qs);
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      for(const e of await res.json()){
+        const rows = (e.data || []).slice(-7);
+        let sum = 0, cnt = 0;
+        for(const r of rows){ sum += r.avg_price * r.item_count; cnt += r.item_count; }
+        hist.set(pkey(e.item_id, e.location, e.quality), {
+          avg: cnt ? sum / cnt : NaN,
+          vol: rows.length ? cnt / rows.length : NaN,
+          days: rows.length,
+        });
+      }
+    }
+  }catch(e){ /* 추이는 보조 정보 — 실패해도 계산은 그대로 */ }
+  // 응답이 없던 조합은 빈 값으로 채워 재요청을 막는다
+  for(const id of want)
+    for(const c of cities)
+      for(const q of qualities)
+        if(!hist.has(pkey(id, c, q))) hist.set(pkey(id, c, q), null);
+}
+const hist7 = (id, city, q = 1) => hist.get(pkey(id, city, q)) || null;
+
 const setStatus = t => document.getElementById('status').textContent = t;
 
 /* ══ 사이드바 ═══════════════════════════════════════════════════ */
@@ -555,20 +642,21 @@ function renderSidebar(){
     }).join('');
 
   const hits = ITEMS.filter(matches);
-  const show = hits.slice(0, 250);
+  const show = hits.slice(0, LIST_MAX);
   const listEl = document.getElementById('list');
   const keepTop = listEl.scrollTop;
   listEl.innerHTML = show.map(r => `
     <div class="row ${r.id===sel?'on':''}" data-id="${esc(r.id)}">
-      <img src="${icon(r.id,64)}" loading="lazy" alt="" onerror="imgFail(this)">
+      <img data-ico="${esc(r.id)}" alt="">
       <div class="nm">${esc(nameOf(r.id))}
         <div class="sub">${esc(r.en || '')}</div></div>
       <span class="tier">${tierLabel(r)}</span>
     </div>`).join('') +
     (hits.length > show.length
-      ? `<div class="more">${hits.length - show.length}종 더 있음 — 검색으로 좁혀보세요</div>`
+      ? `<div class="more">${fmt(hits.length - show.length)}종 더 있음 — 검색으로 좁혀보세요</div>`
       : hits.length ? '' : `<div class="more">일치하는 제작 아이템이 없습니다</div>`);
   listEl.scrollTop = keepTop;
+  hydrateIcons(listEl);
 }
 
 /* ══ 설정 패널 ══════════════════════════════════════════════════ */
@@ -684,7 +772,14 @@ function priceCell(id, crafting, unitCostVal, auto){
   if(!isFinite(bp.v) || !bp.v)
     return `<span class="stale">시세 없음</span>`;
   const h = staleH(bp.date);
-  return `${fmt(bp.v)}${h > 24 ? ` <span class="tag stale">${ago(bp.date)}</span>` : ''}`;
+  const hi = hist7(id, cfg.buyCity, 1);
+  let dev = '';
+  if(hi && isFinite(hi.avg) && hi.avg > 0){
+    const d = bp.v / hi.avg - 1;
+    if(Math.abs(d) >= 0.3)
+      dev = ` <span class="tag stale">평균比 ${d > 0 ? '+' : ''}${(d*100).toFixed(0)}%</span>`;
+  }
+  return `${fmt(bp.v)}${h > 24 ? ` <span class="tag stale">${ago(bp.date)}</span>` : ''}${dev}`;
 }
 
 /* 트리 안의 각 아이템 1개당 원가 (표시용) */
@@ -704,6 +799,7 @@ function render(){
   }
   main.innerHTML = cfgPanel(rec) + '<div id="result"></div>';
   renderResult();
+  hydrateIcons(main);
 }
 
 /* 결과 영역만 다시 그린다 — 설정 패널의 입력 칸은 건드리지 않는다 */
@@ -721,7 +817,7 @@ function renderResult(){
 
   box.innerHTML = `
   <div class="head">
-    <img src="${icon(sel,128)}" alt="" onerror="imgFail(this)">
+    <img data-ico="${esc(sel)}" alt="">
     <div>
       <h2>${esc(nameOf(sel))}</h2>
       <div class="en">${esc(rec.en || '')} · <code>${esc(sel)}</code></div>
@@ -769,7 +865,10 @@ function renderResult(){
     <div class="card"><div class="k">개당 판매가</div>
       <div class="v">${noSell ? '<span class="stale">시세 없음</span>' : fmt(c.sellUnit)}</div>
       <div class="n">${CITY_KO[cfg.sellCity]} · ${cfg.sellMode==='order'?'판매 주문':'즉시 판매'}${
-        c.sp.date ? ' · ' + ago(c.sp.date) : ''}</div></div>
+        c.sp.date ? ' · ' + ago(c.sp.date) : ''}${(() => {
+        const h = hist7(sel, cfg.sellCity, +cfg.quality);
+        return h && isFinite(h.avg) ? `<br>7일 평균 ${fmt(h.avg)}` : '';
+      })()}</div></div>
     <div class="card"><div class="k">개당 순이익</div>
       <div class="v ${profitCls}">${noSell ? '—' : fmt(c.profit / c.qty)}</div>
       <div class="n">세금 ${pct(salesTax()+setupFee())} 차감 후</div></div>
@@ -793,7 +892,14 @@ function renderResult(){
       <div class="n">세금 ${fmt(c.tax)}</div></div>
     <div class="card big"><div class="k">총 순이익</div>
       <div class="v ${profitCls}">${noSell ? '—' : fmt(c.profit)}</div>
-      <div class="n">${noSell ? '판매 시세가 없어 수익 계산 불가' : (c.profit>0?'흑자':'적자')}</div></div>
+      <div class="n">${(() => {
+        if(noSell) return '판매 시세가 없어 수익 계산 불가';
+        const h = hist7(sel, cfg.sellCity, +cfg.quality);
+        if(!h || !isFinite(h.vol) || !h.vol) return c.profit > 0 ? '흑자' : '적자';
+        const days = c.qty / h.vol;
+        return `일 거래량 ${fmt(h.vol)}개 · ${fmt(c.qty)}개는 ${
+          days < 1 ? '하루 물량 안' : fmt1(days) + '일분'}`;
+      })()}</div></div>
   </div>
 
   <div class="sec">재료 내역 <span class="mut" style="font-weight:400;letter-spacing:0">
@@ -814,7 +920,7 @@ function renderResult(){
       return `<tr>
         <td><div class="mat">
           ${'<span class="indent"></span>'.repeat(r.depth)}
-          <img src="${icon(r.id,48)}" loading="lazy" alt="" onerror="imgFail(this)">
+          <img data-ico="${esc(r.id)}" alt="">
           <div class="tw"><div class="nm">${esc(nameOf(r.id))}${
             r.noret ? '<span class="tag nr">반환없음</span>' : ''}</div>
             <div class="id">${esc(r.id)}</div></div>
@@ -842,7 +948,7 @@ function renderResult(){
         const p = rawPrice(id, cfg.buyCity, 1);
         const auto = p ? (cfg.buyMode==='instant' ? p.s : p.b) : 0;
         return `<tr>
-          <td><div class="mat"><img src="${icon(id,48)}" loading="lazy" alt="" onerror="imgFail(this)">
+          <td><div class="mat"><img data-ico="${esc(id)}" alt="">
             <div class="tw"><div class="nm">${esc(nameOf(id))}</div>
             <div class="id">${esc(id)}</div></div></div></td>
           <td>${auto ? fmt(auto) : '<span class="stale">없음</span>'}</td>
@@ -852,7 +958,7 @@ function renderResult(){
         </tr>`;
       }).join('')}
       <tr>
-        <td><div class="mat"><img src="${icon(sel,48)}" alt="" onerror="imgFail(this)">
+        <td><div class="mat"><img data-ico="${esc(sel)}" alt="">
           <div class="tw"><div class="nm">${esc(nameOf(sel))} <span class="tag">판매가</span></div>
           <div class="id">${esc(sel)}</div></div></div></td>
         <td>${isFinite(c.sellUnit) && c.sellUnit ? fmt(c.sellUnit) : '<span class="stale">없음</span>'}</td>
@@ -883,11 +989,14 @@ function renderResult(){
     <b>세금</b> · 판매세 ${cfg.premium?'4% (프리미엄)':'8% (비프리미엄)'}${
       setupFee()?' + 판매 주문 등록비 2.5%':''}.<br>
     <b>명성</b>은 소모 재료의 famevalue 합으로 계산한 추정치입니다.<br>
+    <b>7일 평균·거래량</b> · 시세 추이 API(24시간 집계)의 최근 7일을 거래량 가중 평균한 값입니다.
+    현재가가 평균에서 30% 이상 벗어나면 <span class="tag stale">평균比</span> 표시가 붙습니다.<br>
     데이터: <a href="https://github.com/ao-data/ao-bin-dumps" target="_blank" rel="noopener">ao-bin-dumps</a>
     (${DATA.meta.generated} 기준, ${fmt(DATA.meta.count)}종) ·
     시세: <a href="https://www.albion-online-data.com/" target="_blank" rel="noopener">Albion Online Data Project</a>.
     Sandbox Interactive GmbH 와 무관한 비공식 도구입니다.
   </div>`;
+  hydrateIcons(box);
 }
 
 /* ══ 이벤트 ═════════════════════════════════════════════════════ */

@@ -180,6 +180,7 @@ td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
       <input type="search" id="q" placeholder="한글/영문/아이템ID 검색 (예: 판자, 브로드소드)" autocomplete="off">
       <div class="filters" id="tierf"></div>
       <div class="filters" id="enchf"></div>
+      <button class="btn" id="scan">이 조건으로 수익 후보 탐색</button>
     </div>
     <div class="list" id="list"></div>
   </aside>
@@ -515,29 +516,38 @@ function neededIds(){
   for(const n of nodes){ s.add(n.id); n.kids.forEach(k => s.add(k.id)); }
   return [...s];
 }
+/** 시세를 90개씩 끊어 받아 캐시에 넣는다. onProgress 로 진행률을 보고한다. */
+async function loadPrices(ids, cities, qualities, onProgress){
+  const base = `https://${cfg.server}.albion-online-data.com/api/v2/stats/prices/`;
+  const qs   = `?locations=${cities.map(encodeURIComponent).join(',')}` +
+               `&qualities=${qualities.join(',')}`;
+  let got = 0;
+  for(let i = 0; i < ids.length; i += 90){
+    const chunk = ids.slice(i, i + 90).map(encodeURIComponent).join(',');
+    const res = await fetch(base + chunk + qs);
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    for(const p of await res.json()){
+      prices.set(pkey(p.item_id, p.city, p.quality), {
+        s: p.sell_price_min, b: p.buy_price_max,
+        sd: p.sell_price_min_date.startsWith('0001') ? null : p.sell_price_min_date,
+        bd: p.buy_price_max_date .startsWith('0001') ? null : p.buy_price_max_date,
+      });
+      got++;
+    }
+    if(onProgress) onProgress(Math.min(i + 90, ids.length), ids.length);
+  }
+  return got;
+}
+
 async function fetchPrices(){
   if(fetching) return;
   fetching = true;
   setStatus('시세 불러오는 중…');
   const ids    = neededIds();
   const cities = [...new Set([cfg.buyCity, cfg.sellCity])];
-  const base   = `https://${cfg.server}.albion-online-data.com/api/v2/stats/prices/`;
-  const qs     = `?locations=${cities.map(encodeURIComponent).join(',')}&qualities=1,2,3,4,5`;
   let got = 0, err = null;
   try{
-    for(let i = 0; i < ids.length; i += 90){
-      const chunk = ids.slice(i, i + 90).map(encodeURIComponent).join(',');
-      const res = await fetch(base + chunk + qs);
-      if(!res.ok) throw new Error(`HTTP ${res.status}`);
-      for(const p of await res.json()){
-        prices.set(pkey(p.item_id, p.city, p.quality), {
-          s: p.sell_price_min, b: p.buy_price_max,
-          sd: p.sell_price_min_date.startsWith('0001') ? null : p.sell_price_min_date,
-          bd: p.buy_price_max_date .startsWith('0001') ? null : p.buy_price_max_date,
-        });
-        got++;
-      }
-    }
+    got = await loadPrices(ids, cities, [1,2,3,4,5]);
     lastFetch = new Date();
     await fetchHistory(ids, cities, [...new Set([1, +cfg.quality])]);
   }catch(e){ err = e.message; }
@@ -581,6 +591,114 @@ async function fetchHistory(ids, cities, qualities){
 const hist7 = (id, city, q = 1) => hist.get(pkey(id, city, q)) || null;
 
 const setStatus = t => document.getElementById('status').textContent = t;
+
+/* ══ 수익 후보 탐색 ═════════════════════════════════════════════
+   지금 설정(도시·집중·판매처·품질·세금)을 그대로 적용해, 목록 조건에
+   걸리는 아이템을 한꺼번에 계산하고 이익이 나는 것만 추려 보여준다. */
+let scanBusy = false, scanRows = null, scanInfo = '';
+let scanSort = 'profit';   // profit | margin | vol | safe
+
+/** 결과 정렬 — 거래량과 '7일 평균 대비' 는 이익률만큼이나 중요한 판단 재료다 */
+function scanSorted(){
+  if(!scanRows) return [];
+  const h = x => hist7(x.id, cfg.sellCity, +cfg.quality);
+  const vol = x => { const g = h(x); return g && isFinite(g.vol) ? g.vol : -1; };
+  const dev = x => {
+    const g = h(x);
+    if(!g || !isFinite(g.avg) || !g.avg) return null;
+    return x.sell / g.avg - 1;
+  };
+  const rows = [...scanRows];
+  if(scanSort === 'margin') rows.sort((a,b) => b.margin - a.margin);
+  else if(scanSort === 'vol') rows.sort((a,b) => vol(b) - vol(a));
+  else if(scanSort === 'safe'){
+    // 거래량이 있고 현재가가 평균에서 덜 벗어난 것부터 — 튄 주문에 속지 않도록
+    const score = x => {
+      const d = dev(x), v = vol(x);
+      if(d === null || v < 0) return -Infinity;
+      return v * 1000 - Math.abs(d) * 1e6;
+    };
+    rows.sort((a,b) => score(b) - score(a));
+  }
+  else rows.sort((a,b) => b.profit - a.profit);
+  return rows;
+}
+
+/** 탐색 대상: 사이드바 필터를 그대로 쓰되, 판매처에서 거래되는 것만 남긴다 */
+function scanCandidates(){
+  return ITEMS.filter(r => matches(r) && (!isBM(cfg.sellCity) || BM_SELLS(r)));
+}
+
+/** 후보와 그 재료들을 깊이 제한을 두고 모은다 (시세를 한 번에 받기 위해) */
+function scanIds(candIds, maxDepth = 3){
+  const seen = new Set(), out = new Set();
+  const walk = (id, d) => {
+    out.add(id);
+    if(d >= maxDepth || seen.has(id)) return;
+    seen.add(id);
+    const r = recipeOf(id);
+    if(r) for(const m of r.m) walk(m[0], d + 1);
+  };
+  for(const id of candIds) walk(id, 0);
+  return [...out];
+}
+
+async function runScan(){
+  if(scanBusy) return;
+  scanBusy = true; scanRows = null;
+  const cands = scanCandidates();
+  scanInfo = `${fmt(cands.length)}종 계산 중…`;
+  renderScan();
+  try{
+    const ids    = scanIds(cands.map(r => r.id));
+    const cities = [...new Set([cfg.buyCity, cfg.sellCity])];
+    const quals  = [...new Set([1, +cfg.quality])];
+    await loadPrices(ids, cities, quals, (done, all) => {
+      scanInfo = `시세 ${fmt(done)}/${fmt(all)}종 조회 중…`;
+      setStatus(scanInfo);
+      const el = document.getElementById('scaninfo');
+      if(el) el.textContent = scanInfo;
+    });
+
+    const rows = [];
+    for(const rec of cands){
+      const r = recipeOf(rec.id);
+      if(!r) continue;
+      const u  = unitCost(rec.id, 0, new Set(), []);
+      const sp = sellPrice(rec.id);
+      if(!isFinite(u.cost) || u.cost <= 0) continue;
+      if(!isFinite(sp.v) || !sp.v) continue;
+      const net    = sp.v * (1 - salesTax() - setupFee());
+      const profit = net - u.cost;
+      const mult   = matMult(rec);
+      rows.push({
+        id: rec.id, rec,
+        mats: r.m.map(([mid, cnt, nr]) => ({
+          id: mid,
+          need: (cnt / r.a) * (noReturn(mid, nr) ? 1 : mult),
+          unit: unitCost(mid, 1, new Set(), []).cost,
+        })),
+        matCost: u.cost - u.fee,
+        fee: u.fee, cost: u.cost, sell: sp.v, sp,
+        profit, margin: profit / u.cost,
+        focus: u.focus,
+      });
+    }
+    rows.sort((a, b) => b.profit - a.profit);
+    const win = rows.filter(x => x.profit > 0).slice(0, 60);
+    // 이긴 것만 거래량을 조회한다 (요청 1건이면 끝난다)
+    if(win.length) await fetchHistory(win.map(x => x.id), [cfg.sellCity], quals);
+    scanRows = win;
+    scanInfo = `${fmt(cands.length)}종 중 이익 나는 ${fmt(win.length)}종` +
+               (rows.length > win.length ? ` · 적자 ${fmt(rows.length - win.length)}종 제외` : '') +
+               ` · 시세 없어 계산 못한 ${fmt(cands.length - rows.length)}종 제외`;
+  }catch(e){
+    scanInfo = `탐색 실패: ${e.message}`;
+  }
+  scanBusy = false;
+  setStatus(scanInfo);
+  renderScan();
+}
 
 /* ══ 사이드바 ═══════════════════════════════════════════════════ */
 /* 계열 이름으로도 찾을 수 있게 하는 한글 별칭.
@@ -787,8 +905,95 @@ function unitOf(id){
   return unitCost(id, 1, new Set(), []).cost;
 }
 
+/* ══ 탐색 결과 화면 ═════════════════════════════════════════════ */
+function renderScan(){
+  const main = document.getElementById('main');
+  const rec0 = IX.get(sel);
+  const head = `
+  ${cfgPanel(rec0 && rec0.r ? rec0 : { cc: '', sc: '' })}
+  <div class="head" style="gap:10px">
+    <div style="flex:1">
+      <h2 style="font-size:16px">수익 후보 탐색</h2>
+      <div class="en" id="scaninfo">${esc(scanInfo || '')}</div>
+    </div>
+    <button class="btn" data-scanback="1">아이템 계산으로 돌아가기</button>
+    <button class="btn pri" id="scan2" ${scanBusy ? 'disabled' : ''}>다시 탐색</button>
+  </div>
+  ${scanRows && scanRows.length ? `<div style="display:flex;gap:6px;margin-bottom:8px;align-items:center">
+    <span class="mut" style="font-size:11px">정렬</span>
+    ${[['profit','이익순'],['margin','이익률순'],['vol','거래량순'],['safe','안정성순']]
+      .map(([v,k]) => `<button class="mini ${scanSort===v?'on':''}" data-sort="${v}">${k}</button>`).join('')}
+  </div>` : ''}`;
+
+  if(scanBusy || !scanRows){
+    main.innerHTML = head +
+      `<div class="empty">${scanBusy ? '계산 중입니다…'
+        : '왼쪽 목록 조건(카테고리·티어·인챈트·검색)에 걸리는 아이템을 모두 계산합니다.'}</div>`;
+    hydrateIcons(main); return;
+  }
+  if(!scanRows.length){
+    main.innerHTML = head + `<div class="empty">이익이 나는 후보가 없습니다.<br>
+      <span class="mut">티어·인챈트를 바꾸거나 판매 도시·판매 방식을 조정해 보세요.</span></div>`;
+    hydrateIcons(main); return;
+  }
+
+  main.innerHTML = head + `
+  <table>
+    <thead><tr>
+      <th>아이템</th><th>재료 (1개당 실소모)</th><th>재료비</th><th>수수료</th>
+      <th>개당 원가</th><th>판매가</th><th>7일 평균</th><th>개당 이익</th><th>이익률</th><th>일 거래량</th>
+    </tr></thead>
+    <tbody>
+    ${scanSorted().map(x => {
+      const h = hist7(x.id, cfg.sellCity, +cfg.quality);
+      const thin = !h || !isFinite(h.vol) || h.vol < 20;
+      const dev = h && isFinite(h.avg) && h.avg ? x.sell / h.avg - 1 : null;
+      const spike = dev !== null && Math.abs(dev) >= 0.3;
+      return `<tr data-pick="${esc(x.id)}" style="cursor:pointer">
+        <td><div class="mat">
+          <img data-ico="${esc(x.id)}" alt="">
+          <div class="tw"><div class="nm">${esc(nameOf(x.id))}</div>
+            <div class="id">${tierLabel(x.rec)} · ${esc(x.id)}</div></div>
+        </div></td>
+        <td style="text-align:left">${x.mats.map(m => `
+          <div class="mat" style="gap:5px;margin:1px 0">
+            <img data-ico="${esc(m.id)}" alt="" style="width:20px;height:20px">
+            <span class="mut" style="font-size:11px">${fmtQ(m.need)} ×
+              ${isFinite(m.unit) ? fmt(m.unit) : '—'}</span>
+          </div>`).join('')}</td>
+        <td>${fmt(x.matCost)}</td>
+        <td>${fmt(x.fee)}</td>
+        <td>${fmt(x.cost)}</td>
+        <td>${fmt(x.sell)}${x.sp.date && staleH(x.sp.date) > 24
+              ? `<div class="mut" style="font-size:10px">${ago(x.sp.date)}</div>` : ''}</td>
+        <td>${dev === null ? '<span class="stale">기록 없음</span>'
+              : `${fmt(h.avg)}<div class="${spike ? 'stale' : 'mut'}" style="font-size:10px">${
+                  dev > 0 ? '+' : ''}${(dev*100).toFixed(0)}%</div>`}</td>
+        <td class="up">+${fmt(x.profit)}</td>
+        <td class="up">${pct(x.margin)}</td>
+        <td class="${thin ? 'stale' : 'mut'}">${h && isFinite(h.vol) ? fmt(h.vol) : '—'}</td>
+      </tr>`;
+    }).join('')}
+    </tbody>
+  </table>
+  <div class="note">
+    현재 설정(${CITY_KO[cfg.buyCity]}에서 재료 구매 · ${CITY_KO[cfg.sellCity]}에 
+    ${cfg.sellMode === 'order' ? '판매 주문' : '즉시 판매'} · 
+    ${cfg.station === 'bonus' ? '보너스 도시' : cfg.station === 'island' ? '섬'
+      : cfg.station === 'hideout' ? '은신처' : '일반 도시'}${cfg.focus ? ' · 집중 사용' : ''})
+    기준입니다. 행을 누르면 그 아이템의 상세 계산으로 넘어갑니다.<br>
+    <b>7일 평균 대비</b>가 크게 벌어져 있으면 지금 값이 튄 주문일 가능성이 높습니다.
+    이익률이 아무리 높아도 그 주문 하나가 사라지면 그만입니다.
+    <b>일 거래량</b>이 낮으면(20 미만, 색으로 표시) 만들어도 안 팔립니다.
+    <b>안정성순</b>은 거래량이 있으면서 평균에서 덜 벗어난 것부터 보여줍니다.<br>
+    재료는 시세가 있으면 사서 쓰고, 시세가 없는데 만들 수 있으면 제작 원가로 계산합니다.
+  </div>`;
+  hydrateIcons(main);
+}
+
 /* ══ 메인 ═══════════════════════════════════════════════════════ */
 function render(){
+  if(scanRows !== null || scanBusy) return renderScan();
   renderSidebar();
   const main = document.getElementById('main');
   const rec = IX.get(sel);
@@ -1019,9 +1224,20 @@ function restoreFocus(fn){
 
 document.addEventListener('click', e => {
   const b = e.target.closest('button');
+
+  // 탐색 결과 행을 누르면 그 아이템 상세로
+  const pick = e.target.closest('[data-pick]');
+  if(pick && !b){
+    sel = pick.dataset.pick; localStorage.setItem('ao_sel', sel);
+    scanRows = null; scanBusy = false; recipePick.clear();
+    document.getElementById('main').scrollTop = 0;
+    render(); fetchPrices(); return;
+  }
+
   const row = e.target.closest('.row');
   if(row){ sel = row.dataset.id; localStorage.setItem('ao_sel', sel);
-           recipePick.clear(); document.getElementById('main').scrollTop = 0;
+           recipePick.clear(); scanRows = null; scanBusy = false;
+           document.getElementById('main').scrollTop = 0;
            render(); fetchPrices(); return; }
   if(!b) return;
   if(b.dataset.tab   !== undefined){ tab = b.dataset.tab; renderSidebar(); return; }
@@ -1057,7 +1273,13 @@ document.addEventListener('click', e => {
     }
     saveCraft(); renderResult(); fetchPrices(); return;
   }
-  if(b.id === 'refresh'){ fetchPrices(); return; }
+  if(b.dataset.sort !== undefined){ scanSort = b.dataset.sort; renderScan(); return; }
+  if(b.id === 'scan' || b.id === 'scan2'){ runScan(); return; }
+  if(b.dataset.scanback !== undefined){
+    scanRows = null; scanBusy = false; scanInfo = '';
+    render(); fetchPrices(); return;
+  }
+  if(b.id === 'refresh'){ scanRows !== null ? runScan() : fetchPrices(); return; }
   const seg = b.closest('[data-seg]');
   if(seg){ cfg[seg.dataset.seg] = b.dataset.v; saveCfg(); render(); return; }
 });
@@ -1073,7 +1295,11 @@ document.addEventListener('input', e => {
     saveCfg();
     const refetch = ['buyCity','sellCity'].includes(k);
     // 숫자 입력은 결과만 갱신 — 입력 칸 DOM 을 유지해야 커서가 제자리에 남는다
-    if(el.type === 'number'){ later(renderResult, 250); return; }
+    if(el.type === 'number'){
+      if(scanRows !== null){ scanInfo = '설정이 바뀌었습니다 — 다시 탐색하세요'; 
+        const n = document.getElementById('scaninfo'); if(n) n.textContent = scanInfo; return; }
+      later(renderResult, 250); return;
+    }
     later(() => { restoreFocus(() => render()); if(refetch) fetchPrices(); }, 250);
     return;
   }

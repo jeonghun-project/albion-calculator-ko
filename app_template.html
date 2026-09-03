@@ -626,6 +626,8 @@ const setStatus = t => document.getElementById('status').textContent = t;
    지금 설정(도시·집중·판매처·품질·세금)을 그대로 적용해, 목록 조건에
    걸리는 아이템을 한꺼번에 계산하고 이익이 나는 것만 추려 보여준다. */
 let scanBusy = false, scanRows = null, scanInfo = '';
+/* 탐색 결과는 아이템 상세로 넘어가도 버리지 않고, scanOpen 으로 화면만 오간다 */
+let scanOpen = false;
 let scanSort = 'profit';   // profit | margin | vol | safe
 
 /** 결과 정렬 — 거래량과 '7일 평균 대비' 는 이익률만큼이나 중요한 판단 재료다 */
@@ -675,7 +677,7 @@ function scanIds(candIds, maxDepth = 3){
 
 async function runScan(){
   if(scanBusy) return;
-  scanBusy = true; scanRows = null;
+  scanBusy = true; scanRows = null; scanOpen = true;
   const cands = scanCandidates();
   scanInfo = `${fmt(cands.length)}종 계산 중…`;
   renderScan();
@@ -1029,7 +1031,7 @@ function renderScan(){
 
 /* ══ 메인 ═══════════════════════════════════════════════════════ */
 function render(){
-  if(scanRows !== null || scanBusy) return renderScan();
+  if(scanOpen) return renderScan();
   renderSidebar();
   const main = document.getElementById('main');
   const rec = IX.get(sel);
@@ -1063,6 +1065,9 @@ function renderResult(){
       <h2>${esc(nameOf(sel))}</h2>
       <div class="en">${esc(rec.en || '')} · <code>${esc(sel)}</code></div>
       <div class="badges">
+        ${scanRows && scanRows.length
+          ? `<button class="mini" data-scanopen="1" style="margin-right:4px">◀ 탐색 결과 ${
+              fmt(scanRows.length)}종</button>` : ''}
         <span class="badge">${tierLabel(rec)}</span>
         ${bc ? `<span class="badge">보너스 도시 ${CITY_KO[bc]}</span>` : ''}
         ${craftKind(sel) === 'ench'
@@ -1271,14 +1276,14 @@ document.addEventListener('click', e => {
   const pick = e.target.closest('[data-pick]');
   if(pick && !b){
     sel = pick.dataset.pick; localStorage.setItem('ao_sel', sel);
-    scanRows = null; scanBusy = false; recipePick.clear();
+    scanOpen = false; recipePick.clear();
     document.getElementById('main').scrollTop = 0;
     render(); fetchPrices(); return;
   }
 
   const row = e.target.closest('.row');
   if(row){ sel = row.dataset.id; localStorage.setItem('ao_sel', sel);
-           recipePick.clear(); scanRows = null; scanBusy = false;
+           recipePick.clear(); scanOpen = false;
            document.getElementById('main').scrollTop = 0;
            render(); fetchPrices(); return; }
   if(!b) return;
@@ -1317,11 +1322,13 @@ document.addEventListener('click', e => {
   }
   if(b.dataset.sort !== undefined){ scanSort = b.dataset.sort; renderScan(); return; }
   if(b.id === 'scan' || b.id === 'scan2'){ runScan(); return; }
-  if(b.dataset.scanback !== undefined){
-    scanRows = null; scanBusy = false; scanInfo = '';
-    render(); fetchPrices(); return;
+  if(b.dataset.scanback !== undefined){   // 탐색 화면 → 아이템 계산
+    scanOpen = false; render(); fetchPrices(); return;
   }
-  if(b.id === 'refresh'){ scanRows !== null ? runScan() : fetchPrices(); return; }
+  if(b.dataset.scanopen !== undefined){   // 아이템 계산 → 보관해 둔 탐색 결과
+    scanOpen = true; renderScan(); return;
+  }
+  if(b.id === 'refresh'){ scanOpen ? runScan() : fetchPrices(); return; }
   const seg = b.closest('[data-seg]');
   if(seg){ cfg[seg.dataset.seg] = b.dataset.v; saveCfg(); render(); return; }
 });
@@ -1338,7 +1345,7 @@ document.addEventListener('input', e => {
     const refetch = ['buyCity','sellCity'].includes(k);
     // 숫자 입력은 결과만 갱신 — 입력 칸 DOM 을 유지해야 커서가 제자리에 남는다
     if(el.type === 'number'){
-      if(scanRows !== null){ scanInfo = '설정이 바뀌었습니다 — 다시 탐색하세요'; 
+      if(scanOpen){ scanInfo = '설정이 바뀌었습니다 — 다시 탐색하세요'; 
         const n = document.getElementById('scaninfo'); if(n) n.textContent = scanInfo; return; }
       later(renderResult, 250); return;
     }

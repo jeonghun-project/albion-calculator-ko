@@ -435,6 +435,20 @@ function bestCity(id, q, field, cheapest){
   }
   return best;
 }
+/** 현재 주문이 아예 없을 때 쓸 7일 거래량 가중 평균 (거래가 활발한 재료에 유용).
+   아시아 서버의 T4_HIDE 는 현재 시세가 2개 도시뿐인데 7일 추이는 7개 도시에
+   다 있고 거래량이 하루 38만이다 — 시장이 없는 게 아니라 스냅샷만 빈 것이다. */
+function histPrice(id){
+  const pick = c => { const h = hist7(id, c, 1); return h && isFinite(h.avg) && h.avg ? h : null; };
+  const mine = pick(cfg.buyCity);
+  if(mine) return { v: mine.avg, city: cfg.buyCity };
+  let best = null;
+  for(const c of CITIES.map(x => x[0])){
+    const h = pick(c);
+    if(h && (!best || h.avg < best.v)) best = { v: h.avg, city: c };
+  }
+  return best;
+}
 /** 재료 매입가 */
 function buyPrice(id){
   if(override.has(id)) return { v: +override.get(id), src: 'manual' };
@@ -445,8 +459,12 @@ function buyPrice(id){
     return { v: p[field], src: cfg.buyMode, date: p[dfield], city: cfg.buyCity };
   if(!cfg.crossCity) return { v: NaN, src: 'none' };
   const alt = bestCity(id, 1, field, true);          // 가장 싼 도시
-  if(!alt) return { v: NaN, src: 'none' };
-  return { v: alt.v, src: cfg.buyMode, date: alt.p[dfield], city: alt.city, alt: true };
+  if(alt)
+    return { v: alt.v, src: cfg.buyMode, date: alt.p[dfield], city: alt.city, alt: true };
+  // 어느 도시에도 현재 주문이 없으면 7일 평균으로 보완한다
+  const h = histPrice(id);
+  if(h) return { v: h.v, src: 'hist', city: h.city, hist: true };
+  return { v: NaN, src: 'none' };
 }
 /** 완제품 판매가 — v 는 표시가, net 은 세후 실수령 */
 function sellPrice(id){
@@ -732,6 +750,19 @@ async function runScan(){
       if(el) el.textContent = scanInfo;
     });
 
+    // 어느 도시에도 현재 주문이 없는 재료는 7일 평균으로 채운다.
+    // 후보(완제품)는 제외 — 팔 사람이 없는데 팔린다고 계산하면 안 된다.
+    if(cfg.crossCity){
+      const candSet = new Set(cands.map(r => r.id));
+      const gaps = ids.filter(id => !candSet.has(id) &&
+        !CITIES.some(([c]) => { const p = rawPrice(id, c, 1); return p && (p.s || p.b); }));
+      if(gaps.length){
+        scanInfo = `현재 주문 없는 재료 ${fmt(gaps.length)}종 추이 조회 중…`;
+        setStatus(scanInfo);
+        await fetchHistory(gaps, CITIES.map(c => c[0]), [1]);
+      }
+    }
+
     const rows = [];
     for(const rec of cands){
       const r = recipeOf(rec.id);
@@ -907,8 +938,8 @@ function cfgPanel(rec){
     <div class="cfgrow">
       <label class="chk"><input type="checkbox" data-cfg="focus" ${cfg.focus?'checked':''}>집중 사용 (+59%)</label>
       <label class="chk"><input type="checkbox" data-cfg="premium" ${cfg.premium?'checked':''}>프리미엄 (판매세 4%)</label>
-      <label class="chk" title="고른 도시에 시세가 없으면 값이 있는 다른 도시 시세로 대신합니다"><input
-        type="checkbox" data-cfg="crossCity" ${cfg.crossCity?'checked':''}>다른 도시 시세로 대체</label>
+      <label class="chk" title="고른 도시에 시세가 없으면 다른 도시 시세로, 그것도 없으면 7일 평균으로 재료값을 채웁니다"><input
+        type="checkbox" data-cfg="crossCity" ${cfg.crossCity?'checked':''}>빈 시세 보완</label>
       <div class="field"><label>재료 매입 방식</label>
         <div class="seg" data-seg="buyMode">
           <button data-v="instant" class="${cfg.buyMode==='instant'?'on':''}">즉시 구매</button>
@@ -986,6 +1017,9 @@ function priceCell(id, crafting, unitCostVal, auto){
     return `${fmt(bp.v)} <span class="tag">수동</span>`;
   if(!isFinite(bp.v) || !bp.v)
     return `<span class="stale">시세 없음</span>`;
+  if(bp.hist)
+    return `${fmt(bp.v)} <span class="tag alt">7일 평균</span>${
+      bp.city !== cfg.buyCity ? ` <span class="tag alt">${esc(CITY_KO[bp.city])}</span>` : ''}`;
   const cityTag = bp.alt ? ` <span class="tag alt">${esc(CITY_KO[bp.city])}</span>` : '';
   const h = staleH(bp.date);
   const hi = hist7(id, cfg.buyCity, 1);
@@ -1266,8 +1300,12 @@ function renderResult(){
         <td>${fmtQ(r.need * c.qty)}</td>
         <td>${isFinite(u) ? fmt(u * r.need * c.qty) : '—'}</td>
         <td style="text-align:center">${r.craftable
-          ? `<button class="mini ${r.crafting?'on':''}" data-craft="${esc(r.id)}">${
-              (CRAFT_KIND_BTN[r.kind] || '제작') + (r.crafting ? ' 중' : '')}</button>`
+          ? (r.auto
+              // 살 수 있는 시세가 없어 강제로 제작된 행. 구매로 되돌릴 수 없으니
+              // 토글 버튼을 두면 눌러도 상태가 안 바뀌어 먹통처럼 보인다.
+              ? `<span class="tag stale" title="살 수 있는 시세가 없어 제작으로 계산합니다. 아래 '가격 직접 입력'에 값을 넣으면 구매로 바꿀 수 있습니다.">자동</span>`
+              : `<button class="mini ${r.crafting?'on':''}" data-craft="${esc(r.id)}">${
+              (CRAFT_KIND_BTN[r.kind] || '제작') + (r.crafting ? ' 중' : '')}</button>`)
           : '<span class="mut">—</span>'}</td>
       </tr>`;
     }).join('')}
@@ -1324,9 +1362,11 @@ function renderResult(){
     <b>세금</b> · 판매세 ${cfg.premium?'4% (프리미엄)':'8% (비프리미엄)'}${
       setupFee()?' + 판매 주문 등록비 2.5%':''}.<br>
     <b>명성</b>은 소모 재료의 famevalue 합으로 계산한 추정치입니다.<br>
-    <b>다른 도시 시세로 대체</b> · 고른 도시에 값이 없으면 값이 있는 도시 중
-    재료는 가장 싼 곳, 완제품은 가장 비싼 곳 시세를 대신 씁니다. 그 경우
-    <span class="tag alt">도시명</span> 이 붙습니다 — 실제로 사고팔려면 그 도시로 옮겨야 합니다.
+    <b>빈 시세 보완</b> · 고른 도시에 값이 없으면 값이 있는 도시 중 재료는 가장 싼 곳,
+    완제품은 가장 비싼 곳 시세를 씁니다(<span class="tag alt">도시명</span> 표시 —
+    실제로 사고팔려면 그 도시로 옮겨야 합니다). 어느 도시에도 현재 주문이 없는
+    재료는 <span class="tag alt">7일 평균</span> 으로 채웁니다. 완제품 판매가는
+    보완하지 않습니다 — 살 사람이 없는데 팔린다고 계산하면 안 되니까요.
     암시장은 가격 성격이 달라 대체 대상에서 뺐습니다.<br>
     <b>7일 평균·거래량</b> · 시세 추이 API(24시간 집계)의 최근 7일을 거래량 가중 평균한 값입니다.
     현재가가 평균에서 30% 이상 벗어나면 <span class="tag stale">평균比</span> 표시가 붙습니다.<br>

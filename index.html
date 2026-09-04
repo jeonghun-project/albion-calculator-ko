@@ -474,8 +474,15 @@ function buyPrice(id){
 function sellPrice(id){
   if(override.has('SELL:' + id)){
     const v = +override.get('SELL:' + id);
-    return { v, net: netOf(v, cfg.sellMode), src:'manual',
-             city: isAuto() ? null : cfg.sellCity, mode: cfg.sellMode };
+    // 자동 모드에서도 어느 판매처 기준인지는 남겨야 거래량·피크가를 계속 볼 수 있다
+    let city = cfg.sellCity, mode = cfg.sellMode;
+    if(isAuto()){
+      const opts = venueOptions(id);
+      const best = opts.length ? opts.reduce((a, b) => b.net > a.net ? b : a) : null;
+      city = best ? best.city : null;
+      mode = best ? best.mode : cfg.sellMode;
+    }
+    return { v, net: netOf(v, mode), src:'manual', city, mode };
   }
   // 자동: 실수령이 가장 큰 (도시 × 판매방식) 을 고른다
   if(isAuto()){

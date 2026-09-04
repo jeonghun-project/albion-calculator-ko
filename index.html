@@ -660,13 +660,24 @@ async function fetchHistory(ids, cities, qualities){
       const res = await fetch(base + chunk + qs);
       if(!res.ok) throw new Error(`HTTP ${res.status}`);
       for(const e of await res.json()){
-        const rows = (e.data || []).slice(-7);
-        let sum = 0, cnt = 0;
-        for(const r of rows){ sum += r.avg_price * r.item_count; cnt += r.item_count; }
+        const all  = e.data || [];
+        const rows = all.slice(-7);
+        const wavg = a => {
+          let s = 0, c = 0;
+          for(const r of a){ s += r.avg_price * r.item_count; c += r.item_count; }
+          return c ? { avg: s / c, cnt: c } : null;
+        };
+        const w = wavg(rows);
+        // 최근 3일과 그 앞 7일을 비교해 오르는 중인지 본다.
+        // 하루 평균가만 보면 거래가 한두 건인 날에 휘둘리므로 거래량 가중으로 잡는다.
+        const near = wavg(all.slice(-3)), far = wavg(all.slice(-10, -3));
+        const last = all.length ? all[all.length - 1].timestamp : null;
         hist.set(pkey(e.item_id, e.location, e.quality), {
-          avg: cnt ? sum / cnt : NaN,
-          vol: rows.length ? cnt / rows.length : NaN,
+          avg: w ? w.avg : NaN,
+          vol: rows.length ? (w ? w.cnt : 0) / rows.length : NaN,
           days: rows.length,
+          trend: (near && far && far.avg) ? near.avg / far.avg - 1 : NaN,
+          last,
         });
       }
     }
@@ -678,6 +689,21 @@ async function fetchHistory(ids, cities, qualities){
         if(!hist.has(pkey(id, c, q))) hist.set(pkey(id, c, q), null);
 }
 const hist7 = (id, city, q = 1) => hist.get(pkey(id, city, q)) || null;
+
+/** 최근 추세를 화살표로. 데이터가 오래됐으면 신뢰도가 떨어지므로 표시해 준다. */
+function trendTag(h){
+  if(!h || !isFinite(h.trend)) return '';
+  // 마지막 체결이 며칠 전인지 — 아시아는 3~7일씩 밀리는 아이템이 흔해서 그대로 보여준다
+  const days = h.last ? Math.floor(staleH(h.last) / 24) : null;
+  const old  = days !== null && days >= 3;
+  const age  = old ? ` <span class="mut">${days}일 전</span>` : '';
+  const t = h.trend;
+  if(Math.abs(t) < 0.03)
+    return `<span class="mut" style="font-size:10px">보합${age}</span>`;
+  const cls = old ? 'mut' : (t > 0 ? 'up' : 'dn');
+  return `<span class="${cls}" style="font-size:10px">${t > 0 ? '▲' : '▼'} ${
+    t > 0 ? '+' : ''}${(t * 100).toFixed(0)}%</span>${age}`;
+}
 
 const setStatus = t => document.getElementById('status').textContent = t;
 
@@ -704,6 +730,10 @@ function scanSorted(){
   else if(scanSort === 'focus') rows.sort((a,b) =>
     (isFinite(b.perFocus) ? b.perFocus : -Infinity) - (isFinite(a.perFocus) ? a.perFocus : -Infinity));
   else if(scanSort === 'vol') rows.sort((a,b) => vol(b) - vol(a));
+  else if(scanSort === 'trend'){
+    const tr = x => { const g = h(x); return g && isFinite(g.trend) ? g.trend : -Infinity; };
+    rows.sort((a,b) => tr(b) - tr(a));
+  }
   else if(scanSort === 'safe'){
     // 거래량이 있고 현재가가 평균에서 덜 벗어난 것부터 — 튄 주문에 속지 않도록
     const score = x => {
@@ -1084,7 +1114,7 @@ function renderScan(){
   ${scanRows && scanRows.length ? `<div style="display:flex;gap:6px;margin-bottom:8px;align-items:center">
     <span class="mut" style="font-size:11px">정렬</span>
     ${[['profit','이익순'],['margin','이익률순'],['focus','집중당 이익순'],
-       ['vol','거래량순'],['safe','안정성순']]
+       ['vol','거래량순'],['trend','상승세순'],['safe','안정성순']]
       .map(([v,k]) => `<button class="mini ${scanSort===v?'on':''}" data-sort="${v}">${k}</button>`).join('')}
   </div>` : ''}`;
 
@@ -1104,7 +1134,7 @@ function renderScan(){
   <table>
     <thead><tr>
       <th>아이템</th><th>재료 (1개당 실소모)</th><th>재료비</th><th>수수료</th>
-      <th>개당 원가</th><th>판매처</th><th>판매가</th><th>7일 평균</th>
+      <th>개당 원가</th><th>판매처</th><th>판매가</th><th>7일 평균</th><th>최근 추세</th>
       <th>개당 이익</th><th>이익률</th>${cfg.focus ? '<th>집중당</th>' : ''}<th>일 거래량</th>
     </tr></thead>
     <tbody>
@@ -1137,6 +1167,7 @@ function renderScan(){
         <td>${dev === null ? '<span class="stale">기록 없음</span>'
               : `${fmt(h.avg)}<div class="${spike ? 'stale' : 'mut'}" style="font-size:10px">${
                   dev > 0 ? '+' : ''}${(dev*100).toFixed(0)}%</div>`}</td>
+        <td>${trendTag(h) || '<span class="mut">—</span>'}</td>
         <td class="up">+${fmt(x.profit)}</td>
         <td class="up">${pct(x.margin)}</td>
         ${cfg.focus ? `<td class="${isFinite(x.perFocus) ? 'up' : 'mut'}">${
@@ -1156,6 +1187,10 @@ function renderScan(){
     <b>7일 평균 대비</b>가 크게 벌어져 있으면 지금 값이 튄 주문일 가능성이 높습니다.
     이익률이 아무리 높아도 그 주문 하나가 사라지면 그만입니다.
     <b>일 거래량</b>이 낮으면(20 미만, 색으로 표시) 만들어도 안 팔립니다.
+    <b>최근 추세</b>는 최근 3일 체결가를 그 앞 7일과 견준 값입니다(거래량 가중).
+    <span class="up">▲</span> 면 오르는 중이라 지금 만들 만하고,
+    <span class="dn">▼</span> 면 완성될 즈음 더 떨어져 있을 수 있습니다.
+    마지막 체결이 3일 이상 지났으면 며칠 전인지 함께 표시하고 색을 죽입니다.<br>
     <b>안정성순</b>은 거래량이 있으면서 평균에서 덜 벗어난 것부터 보여줍니다.
     <b>집중당 이익순</b>은 집중을 쓸 때만 나오며, 하루 10,000 집중을 어디에
     쓸지 고르는 기준입니다 — 이익률이 높아도 집중을 많이 먹으면 손해입니다.<br>
@@ -1253,7 +1288,9 @@ function renderResult(){
         (c.sp.mode || cfg.sellMode)==='order'?'판매 주문':'즉시 판매'}${
         c.sp.date ? ' · ' + ago(c.sp.date) : ''}${(() => {
         const h = hist7(sel, cfg.sellCity, +cfg.quality);
-        return h && isFinite(h.avg) ? `<br>7일 평균 ${fmt(h.avg)}` : '';
+        if(!h || !isFinite(h.avg)) return '';
+        const t = trendTag(h);
+        return `<br>7일 평균 ${fmt(h.avg)}${t ? ' · ' + t : ''}`;
       })()}</div></div>
     <div class="card"><div class="k">개당 순이익</div>
       <div class="v ${profitCls}">${noSell ? '—' : fmt(c.profit / c.qty)}</div>

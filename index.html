@@ -708,16 +708,6 @@ async function fetchHistory(ids, cities, qualities){
 }
 const hist7 = (id, city, q = 1) => hist.get(pkey(id, city, q)) || null;
 
-/** 그 판매처에 남이 걸어둔 판매 주문(경쟁 매물)이 있는지.
-   시세 API 는 주문서 맨 위 한 칸만 주므로 '몇 명이 걸었는지' 는 알 수 없다.
-   있는지 없는지와 최저 호가까지만 알 수 있다. */
-function rivalAsk(id, city, q = 1){
-  if(!city) return null;
-  const p = rawPrice(id, city, q) || rawPrice(id, city, 1);
-  if(!p) return { known: false };
-  return { known: true, ask: p.s || 0, date: p.sd };
-}
-
 /** 하루 거래량의 일부만 걸어야 시장을 흔들지 않고 털린다 (통상 10~20%) */
 function suggestQty(h){
   if(!h || !isFinite(h.vol) || h.vol <= 0) return NaN;
@@ -1203,14 +1193,7 @@ function renderScan(){
         <td style="text-align:left"><span class="${x.sp.auto || x.sp.alt ? 'alt2' : ''}">${
               esc(CITY_KO[x.sp.city] || '—')}</span>
           <div class="mut" style="font-size:10px">${
-              x.sp.mode === 'order' ? '판매 주문' : '즉시 판매'}</div>
-          ${(() => {
-            const rv = rivalAsk(x.id, x.sp.city, +cfg.quality);
-            if(!rv || !rv.known) return '';
-            return rv.ask
-              ? `<div class="mut" style="font-size:10px">경쟁 최저 ${fmt(rv.ask)}</div>`
-              : `<div class="up" style="font-size:10px">경쟁 매물 없음</div>`;
-          })()}</td>
+              x.sp.mode === 'order' ? '판매 주문' : '즉시 판매'}</div></td>
         <td>${fmt(x.sell)}${x.sp.date && staleH(x.sp.date) > 24
               ? `<div class="mut" style="font-size:10px">${ago(x.sp.date)}</div>` : ''}</td>
         <td>${dev === null ? '<span class="stale">기록 없음</span>'
@@ -1252,11 +1235,6 @@ function renderScan(){
     <span class="up">▲</span> 면 오르는 중이라 지금 만들 만하고,
     <span class="dn">▼</span> 면 완성될 즈음 더 떨어져 있을 수 있습니다.
     마지막 체결이 3일 이상 지났으면 며칠 전인지 함께 표시하고 색을 죽입니다.<br>
-    <b>경쟁 매물 없음</b>은 그 판매처에 남이 걸어둔 판매 주문이 하나도 없다는 뜻입니다 —
-    호가를 내가 정할 수 있습니다. 다만 시세 API 는 주문서 맨 위 한 칸만 주므로
-    <b>경쟁자가 몇 명인지, 물량이 얼마인지는 알 수 없습니다</b>.
-    암시장은 원래 구매 주문 중심이라 대부분 '경쟁 매물 없음' 으로 나오니
-    그쪽에서는 신호로 쓰기 어렵습니다.<br>
     <b>권장 수량</b>은 하루 거래량의 ${cfg.sellShare}% 입니다. 하루 100개 팔리는 아이템에
     100개를 한 번에 걸면 시장을 눌러버려 악성 재고가 됩니다. 통상 10~20% 선을 지킵니다.<br>
     <b>28일 피크가</b>는 최근 4주 중 가장 높게 체결된 날의 가격입니다(거래가 한두 건뿐인 날은 제외).
@@ -1359,14 +1337,9 @@ function renderResult(){
         (c.sp.mode || cfg.sellMode)==='order'?'판매 주문':'즉시 판매'}${
         c.sp.date ? ' · ' + ago(c.sp.date) : ''}${(() => {
         const h = hist7(sel, cfg.sellCity, +cfg.quality);
-        const rv = rivalAsk(sel, c.sp.city, +cfg.quality);
-        const rival = rv && rv.known
-          ? (rv.ask ? `<br>경쟁 판매주문 최저 ${fmt(rv.ask)}`
-                    : `<br><span class="up">경쟁 판매주문 없음</span>`)
-          : '';
-        if(!h || !isFinite(h.avg)) return rival;
+        if(!h || !isFinite(h.avg)) return '';
         const t = trendTag(h);
-        return `<br>7일 평균 ${fmt(h.avg)}${t ? ' · ' + t : ''}${rival}`;
+        return `<br>7일 평균 ${fmt(h.avg)}${t ? ' · ' + t : ''}`;
       })()}</div></div>
     <div class="card"><div class="k">개당 순이익</div>
       <div class="v ${profitCls}">${noSell ? '—' : fmt(c.profit / c.qty)}</div>

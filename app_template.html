@@ -185,7 +185,7 @@ td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
       <input type="search" id="q" placeholder="한글/영문/아이템ID 검색 (예: 판자, 브로드소드)" autocomplete="off">
       <div class="filters" id="tierf"></div>
       <div class="filters" id="enchf"></div>
-      <button class="btn" id="scan">이 조건으로 수익 후보 탐색</button>
+      <button class="btn" data-scanrun="1">이 조건으로 수익 후보 탐색</button>
     </div>
     <div class="list" id="list"></div>
   </aside>
@@ -1067,7 +1067,7 @@ function renderScan(){
       ${scanHint ? `<div class="hint">${scanHint}</div>` : ''}
     </div>
     <button class="btn" data-scanback="1">아이템 계산으로 돌아가기</button>
-    <button class="btn pri" id="scan2" ${scanBusy ? 'disabled' : ''}>다시 탐색</button>
+    <button class="btn pri" data-scanrun="1" ${scanBusy ? 'disabled' : ''}>다시 탐색</button>
   </div>
   <div class="cfg" style="padding:9px 12px;margin-bottom:10px">
     <h3 style="margin-bottom:7px">걸러내기</h3>
@@ -1198,13 +1198,10 @@ function renderResult(){
   box.innerHTML = `
   <div class="head">
     <img data-ico="${esc(sel)}" alt="">
-    <div>
+    <div style="flex:1;min-width:0">
       <h2>${esc(nameOf(sel))}</h2>
       <div class="en">${esc(rec.en || '')} · <code>${esc(sel)}</code></div>
       <div class="badges">
-        ${scanRows && scanRows.length
-          ? `<button class="mini" data-scanopen="1" style="margin-right:4px">◀ 탐색 결과 ${
-              fmt(scanRows.length)}종</button>` : ''}
         <span class="badge">${tierLabel(rec)}</span>
         ${bc ? `<span class="badge">보너스 도시 ${CITY_KO[bc]}</span>` : ''}
         ${craftKind(sel) === 'ench'
@@ -1216,6 +1213,9 @@ function renderResult(){
         ${recs.length > 1 ? `<span class="badge">레시피 ${recs.length}종</span>` : ''}
       </div>
     </div>
+    ${scanRows && scanRows.length
+      ? `<button class="btn" data-scanopen="1">◀ 탐색 결과 ${fmt(scanRows.length)}종</button>`
+      : `<button class="btn" data-scanrun="1" title="왼쪽 목록 조건(카테고리·티어·인챈트·검색)으로 후보를 찾습니다">수익 후보 탐색</button>`}
   </div>
 
   ${recs.length > 1 ? (() => {
@@ -1465,7 +1465,7 @@ document.addEventListener('click', e => {
     saveCraft(); renderResult(); fetchPrices(); return;
   }
   if(b.dataset.sort !== undefined){ scanSort = b.dataset.sort; renderScan(); return; }
-  if(b.id === 'scan' || b.id === 'scan2'){ runScan(); return; }
+  if(b.dataset.scanrun !== undefined){ runScan(); return; }
   if(b.dataset.scanback !== undefined){   // 탐색 화면 → 아이템 계산
     scanOpen = false; render(); fetchPrices(); return;
   }

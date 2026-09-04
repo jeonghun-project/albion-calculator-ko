@@ -143,6 +143,9 @@ td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
 .stale{color:var(--warn)}
 .tag.alt{background:#2a3550;color:#8fb4e8}
 .alt2{color:#8fb4e8}
+.hint{margin-top:5px;font-size:11.5px;color:#e8d5a8;background:#3a3320;
+  border:1px solid #5c5030;border-radius:5px;padding:6px 9px;line-height:1.6}
+.hint b{color:var(--acc2)}
 .mini{background:none;border:1px solid var(--line);border-radius:4px;padding:1px 7px;font-size:10.5px;color:var(--tx2)}
 .mini:hover{border-color:var(--acc);color:var(--acc2)}
 .mini.on{background:var(--acc);border-color:var(--acc);color:#1a1408;font-weight:700}
@@ -681,7 +684,7 @@ const setStatus = t => document.getElementById('status').textContent = t;
 /* ══ 수익 후보 탐색 ═════════════════════════════════════════════
    지금 설정(도시·집중·판매처·품질·세금)을 그대로 적용해, 목록 조건에
    걸리는 아이템을 한꺼번에 계산하고 이익이 나는 것만 추려 보여준다. */
-let scanBusy = false, scanRows = null, scanInfo = '';
+let scanBusy = false, scanRows = null, scanInfo = '', scanHint = '';
 /* 탐색 결과는 아이템 상세로 넘어가도 버리지 않고, scanOpen 으로 화면만 오간다 */
 let scanOpen = false;
 let scanSort = 'profit';   // profit | margin | vol | safe
@@ -735,7 +738,7 @@ function scanIds(candIds, maxDepth = 3){
 
 async function runScan(){
   if(scanBusy) return;
-  scanBusy = true; scanRows = null; scanOpen = true;
+  scanBusy = true; scanRows = null; scanOpen = true; scanHint = '';
   const cands = scanCandidates();
   scanInfo = `${fmt(cands.length)}종 계산 중…`;
   renderScan();
@@ -764,13 +767,18 @@ async function runScan(){
     }
 
     const rows = [];
+    let noSell = 0, rescuable = 0;   // 판매 시세가 없어 빠진 수 / 설정만 바꾸면 살아나는 수
     for(const rec of cands){
       const r = recipeOf(rec.id);
       if(!r) continue;
       const u  = unitCost(rec.id, 0, new Set(), []);
       const sp = sellPrice(rec.id);
       if(!isFinite(u.cost) || u.cost <= 0) continue;
-      if(!isFinite(sp.v) || !sp.v) continue;
+      if(!isFinite(sp.v) || !sp.v){
+        noSell++;
+        if(!isAuto() && venueOptions(rec.id).length) rescuable++;
+        continue;
+      }
       const profit = sp.net - u.cost;
       const mult   = matMult(rec);
       rows.push({
@@ -816,8 +824,16 @@ async function runScan(){
                ` · 적자 ${fmt(rows.length - pos.length)}종` +
                (cut ? ` · 임계값 미달 ${fmt(cut)}종` : '') +
                ` · 시세 없음 ${fmt(cands.length - rows.length)}종 제외`;
+    // 판매처·판매방식 때문에 대량으로 빠졌으면 어떻게 살리는지 알려준다
+    scanHint = rescuable >= 5
+      ? `판매 시세가 없어 빠진 ${fmt(noSell)}종 중 <b>${fmt(rescuable)}종</b>은 다른 판매처나 판매 방식에서는 값이 있습니다.` +
+        (isBM(cfg.sellCity) && cfg.sellMode === 'order'
+          ? ` 암시장은 판매 주문이 거의 없습니다 — <b>즉시 판매</b>로 바꾸거나`
+          : ` 판매 도시를`) +
+        ` <b>자동 — 최고 실수령</b>으로 두면 잡힙니다.`
+      : '';
   }catch(e){
-    scanInfo = `탐색 실패: ${e.message}`;
+    scanInfo = `탐색 실패: ${e.message}`; scanHint = '';
   }
   scanBusy = false;
   setStatus(scanInfo);
@@ -1048,6 +1064,7 @@ function renderScan(){
     <div style="flex:1">
       <h2 style="font-size:16px">수익 후보 탐색</h2>
       <div class="en" id="scaninfo">${esc(scanInfo || '')}</div>
+      ${scanHint ? `<div class="hint">${scanHint}</div>` : ''}
     </div>
     <button class="btn" data-scanback="1">아이템 계산으로 돌아가기</button>
     <button class="btn pri" id="scan2" ${scanBusy ? 'disabled' : ''}>다시 탐색</button>

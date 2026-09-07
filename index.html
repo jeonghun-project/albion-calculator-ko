@@ -190,6 +190,7 @@ td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
       <div class="filters" id="tierf"></div>
       <div class="filters" id="enchf"></div>
       <button class="btn" data-scanrun="1">이 조건으로 수익 후보 탐색</button>
+      <button class="btn" data-circuitrun="1">도시별 정제 순회</button>
     </div>
     <div class="list" id="list"></div>
   </aside>
@@ -293,6 +294,7 @@ const DEF = {
   premium:true, sellMode:'order',   // order | instant
   crossCity:true,                   // 고른 도시에 시세가 없으면 다른 도시 값으로 대체
   minVol:0, maxDev:0, minProfit:0,  // 탐색 임계값 (거래량·평균比 이탈·개당 이익)
+  chainDepth:'best',                // 정제 순회의 체인 깊이 (0·1·2·3 또는 best)
   sellShare:15,                     // 하루 거래량 대비 몇 %까지 걸 것인가 (10~20% 권장)
   buyMode:'instant',                // instant | order
   fee:800, qty:100, quality:1,
@@ -923,6 +925,122 @@ async function runScan(){
   renderScan();
 }
 
+/* ══ 정제 순회 ══════════════════════════════════════════════════
+   왕국 도시 다섯 곳은 각각 하나의 정제 특화(+40%)를 갖는다. 그래서 정제는
+   '어디서 만들까' 가 아니라 '이 도시에서 뭘 만들까' 의 문제가 된다.
+   도시를 돌면서 각 도시의 특화 자원을 정제하는 한 바퀴를 계산한다. */
+const CIRCUIT = [
+  ['Fort Sterling', 'wood',  '판자'],
+  ['Thetford',      'ore',   '주괴'],
+  ['Martlock',      'hide',  '가죽'],
+  ['Lymhurst',      'fiber', '직물'],
+  ['Bridgewatch',   'rock',  '석괴'],
+];
+let circuitOpen = false, circuitRows = null, circuitInfo = '', circuitBusy = false;
+
+/** 같은 자원 계열의 한 단계 아래 정제품 (T6 판자 → T5 판자) */
+function lowerRefined(id){
+  const rec = IX.get(id), r = recipeOf(id);
+  if(!rec || !r) return null;
+  for(const m of r.m){
+    const sub = IX.get(m[0]);
+    if(sub && sub.cc === rec.cc && sub.s1 === 'refinedresources') return m[0];
+  }
+  return null;
+}
+/** 깊이 d 만큼 하위 정제품을 직접 정제하도록 모은다 */
+function chainIds(id, d){
+  const out = [];
+  let cur = id;
+  for(let i = 0; i < d; i++){
+    const low = lowerRefined(cur);
+    if(!low) break;
+    out.push(low);
+    cur = low;
+  }
+  return out;
+}
+/** 정제 특화 도시 기준으로, 지정한 체인 깊이의 원가를 낸다 */
+function refineCost(id, depth){
+  const keepStation = cfg.station, keepSet = [...craftSet];
+  cfg.station = 'bonus';                       // 특화 도시에서 정제한다는 전제
+  craftSet.clear();
+  for(const x of chainIds(id, depth)) craftSet.add(x);
+  const u = unitCost(id, 0, new Set(), []);
+  cfg.station = keepStation;
+  craftSet.clear();
+  for(const x of keepSet) craftSet.add(x);
+  return u;
+}
+/** 체인 깊이를 0..max 까지 훑어 가장 싼 것을 고른다 */
+function bestRefine(id){
+  const max = chainIds(id, 9).length;
+  let best = null;
+  for(let d = 0; d <= max; d++){
+    const u = refineCost(id, d);
+    if(!isFinite(u.cost) || u.cost <= 0) continue;
+    if(!best || u.cost < best.u.cost) best = { d, u };
+  }
+  return best;
+}
+
+async function runCircuit(){
+  if(circuitBusy) return;
+  circuitBusy = true; circuitRows = null; circuitOpen = true; scanOpen = false;
+  circuitInfo = '정제 대상 계산 중…';
+  renderCircuit();
+  try{
+    const cands = ITEMS.filter(r => r.r && CIRCUIT.some(c => c[1] === r.cc)
+                                 && (!tierF || r.t === tierF)
+                                 && (enchF < 0 || (r.e || 0) === enchF));
+    const ids = scanIds(cands.map(r => r.id), 8);
+    await loadPrices(ids, PRICE_CITIES, [1], (done, all) => {
+      circuitInfo = `시세 ${fmt(done)}/${fmt(all)}종 조회 중…`;
+      setStatus(circuitInfo);
+      const el = document.getElementById('circuitinfo');
+      if(el) el.textContent = circuitInfo;
+    });
+
+    const rows = [];
+    for(const rec of cands){
+      const pick = cfg.chainDepth === 'best'
+        ? bestRefine(rec.id)
+        : (() => { const u = refineCost(rec.id, +cfg.chainDepth || 0);
+                   return isFinite(u.cost) && u.cost > 0 ? { d: +cfg.chainDepth || 0, u } : null; })();
+      if(!pick) continue;
+      const sp = sellPrice(rec.id, 1);
+      if(!isFinite(sp.v) || !sp.v) continue;
+      const profit = sp.net - pick.u.cost;
+      rows.push({
+        id: rec.id, rec, city: REFINE_CITY[rec.cc], depth: pick.d,
+        maxDepth: chainIds(rec.id, 9).length,
+        cost: pick.u.cost, fee: pick.u.fee, focus: pick.u.focus,
+        sell: sp.v, sp, profit, margin: profit / pick.u.cost,
+      });
+    }
+    rows.sort((a, b) => b.profit - a.profit);
+    const win = rows.filter(x => x.profit > 0);
+    if(win.length){
+      const byCity = new Map();
+      for(const x of win.slice(0, 120)){
+        const c = x.sp.city || cfg.sellCity;
+        if(!byCity.has(c)) byCity.set(c, []);
+        byCity.get(c).push(x.id);
+      }
+      for(const [c, list] of byCity) await fetchHistory(list, [c], [1]);
+    }
+    circuitRows = win;
+    circuitInfo = `정제품 ${fmt(cands.length)}종 중 이익 나는 ${fmt(win.length)}종` +
+                  ` · 적자 ${fmt(rows.length - win.length)}종` +
+                  ` · 시세 없음 ${fmt(cands.length - rows.length)}종 제외`;
+  }catch(e){
+    circuitInfo = `계산 실패: ${e.message}`;
+  }
+  circuitBusy = false;
+  setStatus(circuitInfo);
+  renderCircuit();
+}
+
 /* ══ 사이드바 ═══════════════════════════════════════════════════ */
 /* 계열 이름으로도 찾을 수 있게 하는 한글 별칭.
    게임 한글 이름에는 계열 이름이 들어가지 않는다 — 셰이프시프터 계열의 한글 이름은
@@ -1282,8 +1400,104 @@ function renderScan(){
   hydrateIcons(main);
 }
 
+/* ══ 정제 순회 화면 ═════════════════════════════════════════════ */
+function renderCircuit(){
+  const main = document.getElementById('main');
+  const rec0 = IX.get(sel);
+  const depths = [['0','하위 정제품 구매'],['1','1단계'],['2','2단계'],['3','3단계'],['best','최적(자동)']];
+  const head = `
+  ${cfgPanel(rec0 && rec0.r ? rec0 : { cc: '', sc: '' })}
+  <div class="head" style="gap:10px">
+    <div style="flex:1;min-width:0">
+      <h2 style="font-size:16px">정제 순회</h2>
+      <div class="en" id="circuitinfo">${esc(circuitInfo || '')}</div>
+    </div>
+    <button class="btn" data-circuitback="1">아이템 계산으로</button>
+    <button class="btn pri" data-circuitrun="1" ${circuitBusy ? 'disabled' : ''}>다시 계산</button>
+  </div>
+  <div class="cfg" style="padding:9px 12px;margin-bottom:10px">
+    <h3 style="margin-bottom:7px">체인 깊이</h3>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      ${depths.map(([v,k]) => `<button class="mini ${String(cfg.chainDepth)===v?'on':''}"
+        data-chain="${v}">${k}</button>`).join('')}
+      <span class="status" style="margin-left:6px">하위 정제품을 사서 한 단계만 정제할지,
+        아래로 몇 단계까지 직접 정제할지 고릅니다. <b>최적</b>은 행마다 가장 싼 깊이를 골라
+        몇 단계인지 표시합니다.</span>
+    </div>
+  </div>`;
+
+  if(circuitBusy || !circuitRows){
+    main.innerHTML = head + `<div class="empty">${circuitBusy ? '계산 중입니다…'
+      : '왕국 도시 다섯 곳의 정제 특화(+40%)를 기준으로 한 바퀴를 계산합니다.<br>' +
+        '<span class="mut">왼쪽의 티어·인챈트 필터가 적용됩니다.</span>'}</div>`;
+    hydrateIcons(main); return;
+  }
+
+  const groups = CIRCUIT.map(([city, cc, label]) => ({
+    city, cc, label,
+    rows: circuitRows.filter(x => x.rec.cc === cc).slice(0, 8),
+  }));
+  const lap = groups.reduce((a, g) => a + (g.rows[0] ? g.rows[0].profit : 0), 0);
+
+  main.innerHTML = head + `
+  <div class="cards">
+    <div class="card big"><div class="k">한 바퀴 개당 이익 합</div>
+      <div class="v ${lap > 0 ? 'up' : ''}">${fmt(lap)}</div>
+      <div class="n">도시마다 가장 좋은 것 하나씩, 개당 기준</div></div>
+    <div class="card"><div class="k">이익 나는 정제품</div>
+      <div class="v">${fmt(circuitRows.length)}</div>
+      <div class="n">전체 ${fmt(CIRCUIT.length)}개 도시</div></div>
+  </div>
+  ${groups.map(g => `
+    <div class="sec">${esc(CITY_KO[g.city])} — ${esc(g.label)} 특화 <span class="mut"
+      style="font-weight:400;letter-spacing:0">정제 반환 +40%</span></div>
+    ${g.rows.length ? `<div style="overflow-x:auto"><table>
+      <thead><tr><th>정제품</th><th>체인</th><th>개당 원가</th><th>수수료</th>
+        <th>판매처</th><th>판매가</th><th>개당 이익</th><th>이익률</th>
+        <th>일 거래량</th><th>권장 수량</th></tr></thead>
+      <tbody>${g.rows.map((x, i) => {
+        const h = hist7(x.id, x.sp.city || cfg.sellCity, 1);
+        const q = suggestQty(h);
+        return `<tr data-pick="${esc(x.id)}" data-q="1" style="cursor:pointer${
+          i === 0 ? ';background:#1e2a20' : ''}">
+          <td><div class="mat"><img data-ico="${esc(x.id)}" alt="">
+            <div class="tw"><div class="nm">${esc(nameOf(x.id))}</div>
+            <div class="id">${tierLabel(x.rec)} · ${esc(x.id)}</div></div></div></td>
+          <td>${x.depth === 0 ? '<span class="mut">구매</span>'
+                : `${x.depth}단계`}${x.maxDepth > x.depth
+                ? `<div class="mut" style="font-size:10px">최대 ${x.maxDepth}</div>` : ''}</td>
+          <td>${fmt(x.cost)}</td>
+          <td>${fmt(x.fee)}</td>
+          <td style="text-align:left"><span class="${x.sp.auto || x.sp.alt ? 'alt2' : ''}">${
+            esc(CITY_KO[x.sp.city] || '—')}</span>
+            <div class="mut" style="font-size:10px">${
+              x.sp.mode === 'order' ? '판매 주문' : '즉시 판매'}</div></td>
+          <td>${fmt(x.sell)}${trendTag(h) ? `<div>${trendTag(h)}</div>` : ''}</td>
+          <td class="up">+${fmt(x.profit)}</td>
+          <td class="up">${pct(x.margin)}</td>
+          <td class="${!h || !isFinite(h.vol) || h.vol < 20 ? 'stale' : 'mut'}">${
+            h && isFinite(h.vol) ? fmt(h.vol) : '—'}</td>
+          <td>${isFinite(q) ? `<b>${fmt(q)}</b>개` : '<span class="mut">—</span>'}</td>
+        </tr>`;
+      }).join('')}</tbody></table></div>`
+    : `<div class="empty" style="padding:22px">이익 나는 정제품이 없습니다</div>`}
+  `).join('')}
+  <div class="note">
+    도시마다 정제 특화가 달라 <b>그 도시에서는 그 자원만</b> +40% 반환을 받습니다.
+    각 도시의 첫 줄(초록 배경)이 그 도시에서 가장 이익이 큰 정제품입니다.<br>
+    <b>체인</b> 열의 '구매' 는 하위 정제품을 시장에서 사서 한 단계만 정제한 것이고,
+    'N단계' 는 아래로 N번 더 직접 정제한 것입니다. 깊게 갈수록 원가는 내려가지만
+    자본과 시간이 더 들고, 중간 자원 시세가 비면 계산이 흔들립니다.<br>
+    원가는 정제 특화 도시에서 만든다는 전제로 계산합니다 —
+    위 '제작 조건' 의 제작 장소 설정과 무관하게 항상 +40% 를 적용합니다.
+    재료 구매 도시와 판매처 설정은 그대로 반영됩니다.
+  </div>`;
+  hydrateIcons(main);
+}
+
 /* ══ 메인 ═══════════════════════════════════════════════════════ */
 function render(){
+  if(circuitOpen) return renderCircuit();
   if(scanOpen) return renderScan();
   renderSidebar();
   const main = document.getElementById('main');
@@ -1329,6 +1543,8 @@ function renderResult(){
         ${recs.length > 1 ? `<span class="badge">레시피 ${recs.length}종</span>` : ''}
       </div>
     </div>
+    ${circuitRows && circuitRows.length
+      ? `<button class="btn" data-circuitopen="1">◀ 정제 순회</button>` : ''}
     ${scanRows && scanRows.length
       ? `<button class="btn" data-scanopen="1">◀ 탐색 결과 ${fmt(scanRows.length)}종</button>`
       : `<button class="btn" data-scanrun="1" title="왼쪽 목록 조건(카테고리·티어·인챈트·검색)으로 후보를 찾습니다">수익 후보 탐색</button>`}
@@ -1570,14 +1786,14 @@ document.addEventListener('click', e => {
   if(pick && !b){
     sel = pick.dataset.pick; localStorage.setItem('ao_sel', sel);
     if(pick.dataset.q){ cfg.quality = +pick.dataset.q; saveCfg(); }
-    scanOpen = false; recipePick.clear();
+    scanOpen = false; circuitOpen = false; recipePick.clear();
     document.getElementById('main').scrollTop = 0;
     render(); fetchPrices(); return;
   }
 
   const row = e.target.closest('.row');
   if(row){ sel = row.dataset.id; localStorage.setItem('ao_sel', sel);
-           recipePick.clear(); scanOpen = false;
+           recipePick.clear(); scanOpen = false; circuitOpen = false;
            document.getElementById('main').scrollTop = 0;
            render(); fetchPrices(); return; }
   if(!b) return;
@@ -1621,14 +1837,21 @@ document.addEventListener('click', e => {
   if(b.dataset.setsell !== undefined){
     override.set('SELL:' + sel, b.dataset.setsell); saveOvr(); render(); return;
   }
-  if(b.dataset.scanrun !== undefined){ runScan(); return; }
+  if(b.dataset.circuitrun !== undefined){ scanOpen = false; runCircuit(); return; }
+  if(b.dataset.circuitback !== undefined){ circuitOpen = false; render(); fetchPrices(); return; }
+  if(b.dataset.circuitopen !== undefined){ circuitOpen = true; renderCircuit(); return; }
+  if(b.dataset.chain !== undefined){
+    cfg.chainDepth = b.dataset.chain === 'best' ? 'best' : +b.dataset.chain;
+    saveCfg(); runCircuit(); return;
+  }
+  if(b.dataset.scanrun !== undefined){ circuitOpen = false; runScan(); return; }
   if(b.dataset.scanback !== undefined){   // 탐색 화면 → 아이템 계산
     scanOpen = false; render(); fetchPrices(); return;
   }
   if(b.dataset.scanopen !== undefined){   // 아이템 계산 → 보관해 둔 탐색 결과
     scanOpen = true; renderScan(); return;
   }
-  if(b.id === 'refresh'){ scanOpen ? runScan() : fetchPrices(); return; }
+  if(b.id === 'refresh'){ circuitOpen ? runCircuit() : scanOpen ? runScan() : fetchPrices(); return; }
   const seg = b.closest('[data-seg]');
   if(seg){ cfg[seg.dataset.seg] = b.dataset.v; saveCfg(); render(); return; }
 });

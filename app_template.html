@@ -167,6 +167,8 @@ td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
 .mini{background:none;border:1px solid var(--line);border-radius:4px;padding:1px 7px;font-size:10.5px;color:var(--tx2)}
 .mini:hover{border-color:var(--acc);color:var(--acc2)}
 .mini.on{background:var(--acc);border-color:var(--acc);color:#1a1408;font-weight:700}
+.mini.lvS{background:#9aa4b8;border-color:#9aa4b8;color:#14171d;font-weight:700}
+.mini.lvG{background:var(--acc);border-color:var(--acc);color:#1a1408;font-weight:700}
 
 .sec{margin:18px 0 8px;font-size:11px;color:var(--tx3);font-weight:600;letter-spacing:.06em;
   display:flex;align-items:center;gap:8px}
@@ -205,6 +207,7 @@ td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
       <div class="filters" id="enchf"></div>
       <button class="btn" data-scanrun="1">이 조건으로 수익 후보 탐색</button>
       <button class="btn" data-circuitrun="1">도시별 정제 순회</button>
+      <button class="btn pri" data-todorun="1">오늘 할 일</button>
     </div>
     <div class="list" id="list"></div>
   </aside>
@@ -304,7 +307,8 @@ const TABS = [
 const DEF = {
   server:'east', buyCity:'Martlock', sellCity:'Martlock',
   station:'bonus',        // island | city | bonus | hideout
-  focus:false, fce:0, daily:0, extra:0,
+  focus:false, fce:0, extra:0,
+  dailyCats:{},                     // 오늘 일일 보너스가 걸린 카테고리 → 10(실버) | 20(골드)
   premium:true, sellMode:'order',   // order | instant
   crossCity:true,                   // 고른 도시에 시세가 없으면 다른 도시 값으로 대체
   minVol:0, maxDev:0, minProfit:0,  // 탐색 임계값 (거래량·평균比 이탈·개당 이익)
@@ -431,7 +435,8 @@ function bonusSum(rec){
   if(cfg.station === 'city' || cfg.station === 'hideout') b += 0.18;
   else if(cfg.station === 'bonus') b += 0.18 + (isRefineCat(rec.cc) ? 0.40 : 0.15);
   if(cfg.focus) b += 0.59;
-  b += cfg.daily / 100 + cfg.extra / 100;
+  // 일일 보너스는 그날 뽑힌 카테고리에만 붙는다 (실버 +10% / 골드 +20%)
+  b += ((cfg.dailyCats || {})[rec.cc] || 0) / 100 + cfg.extra / 100;
   return b;
 }
 const returnRate = rec => { const b = bonusSum(rec); return b / (1 + b); };
@@ -803,6 +808,7 @@ const setStatus = t => document.getElementById('status').textContent = t;
 /* ══ 수익 후보 탐색 ═════════════════════════════════════════════
    지금 설정(도시·집중·판매처·품질·세금)을 그대로 적용해, 목록 조건에
    걸리는 아이템을 한꺼번에 계산하고 이익이 나는 것만 추려 보여준다. */
+let dailyOpen = false, scanTodo = false;
 let scanBusy = false, scanRows = null, scanInfo = '', scanHint = '';
 /* 탐색 결과는 아이템 상세로 넘어가도 버리지 않고, scanOpen 으로 화면만 오간다 */
 let scanOpen = false;
@@ -842,6 +848,10 @@ function scanSorted(){
 
 /** 탐색 대상: 사이드바 필터를 그대로 쓰되, 판매처에서 거래되는 것만 남긴다 */
 function scanCandidates(){
+  if(todoMode)      // 오늘 보너스 걸린 카테고리만, 사이드바 필터는 티어·인챈트만 적용
+    return ITEMS.filter(r => r.r && dailyLevel(r.cc)
+      && (!tierF || r.t === tierF) && (enchF < 0 || (r.e || 0) === enchF)
+      && (!isBM(cfg.sellCity) || BM_SELLS(r)));
   return ITEMS.filter(r => matches(r) && (!isBM(cfg.sellCity) || BM_SELLS(r)));
 }
 
@@ -859,9 +869,25 @@ function scanIds(candIds, maxDepth = 3){
   return [...out];
 }
 
+/* 오늘 일일 보너스가 걸린 카테고리만 훑는다. 보너스가 붙은 것만 보면
+   '오늘 뭘 해야 하나' 가 바로 나온다 — 카테고리 수가 적어 조회도 가볍다. */
+let todoMode = false;
+async function runTodo(){
+  if(!dailyCount()){
+    dailyOpen = true;
+    scanOpen = false; circuitOpen = false;
+    render();
+    setStatus('오늘 일일 보너스가 걸린 카테고리를 먼저 골라주세요');
+    return;
+  }
+  todoMode = true;
+  await runScan();
+  todoMode = false;
+}
+
 async function runScan(){
   if(scanBusy) return;
-  scanBusy = true; scanRows = null; scanOpen = true; scanHint = '';
+  scanBusy = true; scanRows = null; scanOpen = true; scanHint = ''; scanTodo = todoMode;
   const cands = scanCandidates();
   scanInfo = `${fmt(cands.length)}종 계산 중…`;
   renderScan();
@@ -1036,6 +1062,17 @@ function craftDemand(){
   _demand = acc;
   return acc;
 }
+/* 일일 보너스가 걸릴 수 있는 생산 카테고리 — 정제 5계열 + 제작 특화 + 요리·연금 */
+const DAILY_GROUPS = [
+  ['정제', ['wood', 'ore', 'hide', 'fiber', 'rock']],
+  ['무기', ['sword','axe','mace','hammer','spear','dagger','quarterstaff','knuckles',
+            'bow','crossbow','firestaff','froststaff','arcanestaff','holystaff',
+            'naturestaff','cursestaff','shapeshifterstaff','offhand']],
+  ['방어구', ['plate_armor','plate_helmet','plate_shoes','leather_armor','leather_helmet',
+              'leather_shoes','cloth_armor','cloth_helmet','cloth_shoes']],
+  ['기타', ['bag','cape','food','potion','tools','gatherergear']],
+];
+
 /* 제작 특화 카테고리의 한글 이름 — 요약에 쓴다 */
 const CAT_KO = {
   sword:'한손검·양손검', axe:'도끼', mace:'메이스', hammer:'해머', spear:'창',
@@ -1046,8 +1083,13 @@ const CAT_KO = {
   plate_armor:'판금 갑옷', plate_helmet:'판금 투구', plate_shoes:'판금 신발',
   leather_armor:'가죽 갑옷', leather_helmet:'가죽 투구', leather_shoes:'가죽 신발',
   cloth_armor:'천 갑옷', cloth_helmet:'천 투구', cloth_shoes:'천 신발',
-  bag:'가방', cape:'망토',
+  bag:'가방', cape:'망토', food:'음식', potion:'물약',
+  tools:'채집 도구', gatherergear:'채집 장비',
+  wood:'판자(목재)', ore:'주괴(광석)', hide:'가죽(피혁)',
+  fiber:'직물(섬유)', rock:'석괴(석재)',
 };
+const dailyLevel = cc => (cfg.dailyCats || {})[cc] || 0;
+const dailyCount = () => Object.keys(cfg.dailyCats || {}).length;
 
 /** 그 정제 계열을 가장 많이 쓰는 도시 순서 */
 function demandCities(kind){
@@ -1262,8 +1304,9 @@ function cfgPanel(rec){
         <input type="number" data-cfg="fee" value="${cfg.fee}" min="0" step="50"></div>
       <div class="field"><label>집중 비용 효율 (FCE)</label>
         <input type="number" data-cfg="fce" value="${cfg.fce}" min="0" step="1000"></div>
-      <div class="field"><label>일일 보너스 %</label>
-        <input type="number" data-cfg="daily" value="${cfg.daily}" min="0" step="5"></div>
+      <div class="field"><label>오늘 일일 보너스</label>
+        <button class="btn" data-dailyopen="1" style="padding:5px 7px;text-align:left">${
+          dailyCount() ? `${fmt(dailyCount())}개 카테고리 선택됨` : '설정하기'}</button></div>
       <div class="field"><label>추가 보너스 %</label>
         <input type="number" data-cfg="extra" value="${cfg.extra}" step="1"></div>
       <div class="field"><label>완제품 품질</label>
@@ -1271,6 +1314,25 @@ function cfgPanel(rec){
           [[1,'일반'],[2,'좋음'],[3,'뛰어남'],[4,'훌륭함'],[5,'걸작']].map(([v,k]) =>
           `<option value="${v}" ${+cfg.quality===v?'selected':''}>${k}</option>`).join('')}</select></div>
     </div>
+    ${dailyOpen ? `<div class="cfgrow" style="display:block">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
+        <b style="font-size:12px">오늘의 일일 보너스</b>
+        <span class="status">인게임 <b>액티비티</b> 메뉴에서 오늘 뽑힌 카테고리를 확인해 눌러주세요.
+          한 번 누르면 실버(+10%), 두 번이면 골드(+20%), 세 번이면 해제됩니다.</span>
+        <button class="mini" data-dailyclear="1">전체 해제</button>
+        <button class="mini" data-dailyopen="0">닫기</button>
+      </div>
+      ${DAILY_GROUPS.map(([g, list]) => `
+        <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin:3px 0">
+          <span class="mut" style="font-size:10.5px;width:40px">${g}</span>
+          ${list.map(cc => {
+            const lv = dailyLevel(cc);
+            return `<button class="mini ${lv === 10 ? 'lvS' : lv === 20 ? 'lvG' : ''}"
+              data-dailycat="${cc}">${esc(CAT_KO[cc] || cc)}${
+              lv ? ` +${lv}%` : ''}</button>`;
+          }).join('')}
+        </div>`).join('')}
+    </div>` : ''}
     <div class="cfgrow">
       <label class="chk"><input type="checkbox" data-cfg="focus" ${cfg.focus?'checked':''}>집중 사용 (+59%)</label>
       <label class="chk"><input type="checkbox" data-cfg="premium" ${cfg.premium?'checked':''}>프리미엄 (판매세 4%)</label>
@@ -1382,12 +1444,17 @@ function renderScan(){
   ${cfgPanel(rec0 && rec0.r ? rec0 : { cc: '', sc: '' })}
   <div class="head" style="gap:10px">
     <div style="flex:1">
-      <h2 style="font-size:16px">수익 후보 탐색</h2>
+      <h2 style="font-size:16px">${scanTodo ? '오늘 할 일' : '수익 후보 탐색'}</h2>
       <div class="en" id="scaninfo">${esc(scanInfo || '')}</div>
       ${scanHint ? `<div class="hint">${scanHint}</div>` : ''}
+  ${scanTodo ? `<div class="hint" style="background:#20301f;border-color:#3a5a38;color:#c8e0c0">
+    오늘 보너스가 걸린 <b>${Object.entries(cfg.dailyCats).map(([cc, lv]) =>
+      `${esc(CAT_KO[cc] || cc)} +${lv}%`).join(' · ')}</b> 만 계산했습니다.
+    보너스가 반환율에 이미 더해져 있습니다.</div>` : ''}
     </div>
     <button class="btn" data-scanback="1">아이템 계산으로 돌아가기</button>
-    <button class="btn pri" data-scanrun="1" ${scanBusy ? 'disabled' : ''}>다시 탐색</button>
+    <button class="btn pri" data-${scanTodo ? 'todorun' : 'scanrun'}="1" ${
+      scanBusy ? 'disabled' : ''}>다시 계산</button>
   </div>
   <div class="cfg" style="padding:9px 12px;margin-bottom:10px">
     <h3 style="margin-bottom:7px">걸러내기</h3>
@@ -2152,6 +2219,27 @@ document.addEventListener('click', e => {
   if(b.dataset.setsell !== undefined){
     override.set('SELL:' + sel, b.dataset.setsell); saveOvr(); render(); return;
   }
+  if(b.dataset.dailyopen !== undefined){
+    dailyOpen = b.dataset.dailyopen !== '0';
+    scanOpen || circuitOpen ? (circuitOpen ? renderCircuit() : renderScan()) : render();
+    return;
+  }
+  if(b.dataset.dailycat !== undefined){
+    const cc = b.dataset.dailycat;
+    const cur = dailyLevel(cc);
+    cfg.dailyCats = { ...(cfg.dailyCats || {}) };
+    if(cur === 0) cfg.dailyCats[cc] = 10;
+    else if(cur === 10) cfg.dailyCats[cc] = 20;
+    else delete cfg.dailyCats[cc];
+    saveCfg();
+    scanOpen || circuitOpen ? (circuitOpen ? renderCircuit() : renderScan()) : render();
+    return;
+  }
+  if(b.dataset.dailyclear !== undefined){
+    cfg.dailyCats = {}; saveCfg();
+    scanOpen || circuitOpen ? (circuitOpen ? renderCircuit() : renderScan()) : render();
+    return;
+  }
   if(b.dataset.circuitrun !== undefined){ scanOpen = false; runCircuit(); return; }
   if(b.dataset.circuitback !== undefined){ circuitOpen = false; render(); fetchPrices(); return; }
   if(b.dataset.circuitopen !== undefined){ circuitOpen = true; renderCircuit(); return; }
@@ -2159,6 +2247,7 @@ document.addEventListener('click', e => {
     cfg.chainDepth = b.dataset.chain === 'best' ? 'best' : +b.dataset.chain;
     saveCfg(); runCircuit(); return;
   }
+  if(b.dataset.todorun !== undefined){ circuitOpen = false; runTodo(); return; }
   if(b.dataset.scanrun !== undefined){ circuitOpen = false; runScan(); return; }
   if(b.dataset.scanback !== undefined){   // 탐색 화면 → 아이템 계산
     scanOpen = false; render(); fetchPrices(); return;

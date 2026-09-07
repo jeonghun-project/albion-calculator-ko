@@ -938,6 +938,46 @@ const CIRCUIT = [
 ];
 let circuitOpen = false, circuitRows = null, circuitInfo = '', circuitBusy = false;
 
+/* 정제 특화 도시는 '생산지' 라 그 재료가 싸다. 반대로 그 재료를 쓰는 제작 특화를
+   가진 도시는 '수요지' 다 — 정제품은 거기 가져가 파는 게 맞다.
+   어느 도시가 무엇을 얼마나 소모하는지는 하드코딩하지 않고 레시피에서 뽑는다. */
+const KIND_KO = { wood:'판자', ore:'주괴', hide:'가죽', fiber:'직물', rock:'석괴' };
+const refinedKind = id => {
+  const r = IX.get(id);
+  return r && r.s1 === 'refinedresources' ? r.cc : null;
+};
+let _demand = null;
+/** { 도시: { 정제계열: 비중 } } — 제작 특화 레시피가 소모하는 정제 재료 */
+function craftDemand(){
+  if(_demand) return _demand;
+  const acc = {};
+  for(const r of ITEMS){
+    const city = CRAFT_CITY[r.cc];
+    if(!city || !r.r || r.e) continue;      // 인챈트 변형은 중복이라 .0 만 센다
+    const rec = r.r[0];
+    for(const m of rec.m){
+      const k = refinedKind(m[0]);
+      if(!k) continue;
+      (acc[city] = acc[city] || {});
+      acc[city][k] = (acc[city][k] || 0) + m[1] / rec.a;
+    }
+  }
+  for(const city in acc){
+    const tot = Object.values(acc[city]).reduce((a, b) => a + b, 0) || 1;
+    for(const k in acc[city]) acc[city][k] /= tot;
+  }
+  _demand = acc;
+  return acc;
+}
+/** 그 정제 계열을 가장 많이 쓰는 도시 순서 */
+function demandCities(kind){
+  const d = craftDemand();
+  return Object.entries(d)
+    .filter(([, v]) => v[kind])
+    .map(([city, v]) => ({ city, share: v[kind] }))
+    .sort((a, b) => b.share - a.share);
+}
+
 /** 같은 자원 계열의 한 단계 아래 정제품 (T6 판자 → T5 판자) */
 function lowerRefined(id){
   const rec = IX.get(id), r = recipeOf(id);
@@ -1451,9 +1491,18 @@ function renderCircuit(){
   ${groups.map(g => `
     <div class="sec">${esc(CITY_KO[g.city])} — ${esc(g.label)} 특화 <span class="mut"
       style="font-weight:400;letter-spacing:0">정제 반환 +40%</span></div>
+    ${(() => {
+      const d = craftDemand()[g.city];
+      if(!d) return `<div class="status" style="margin-bottom:6px">이 도시의 제작 특화는
+        정제 재료를 쓰지 않습니다</div>`;
+      const list = Object.entries(d).sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${KIND_KO[k]} ${(v * 100).toFixed(0)}%`).join(' · ');
+      return `<div class="status" style="margin-bottom:6px">이 도시 제작자들이 사가는 재료:
+        <b>${list}</b> — 여기서 ${esc(g.label)}를 정제하는 김에 이 재료들을 팔면 됩니다</div>`;
+    })()}
     ${g.rows.length ? `<div style="overflow-x:auto"><table>
       <thead><tr><th>정제품</th><th>체인</th><th>개당 원가</th><th>수수료</th>
-        <th>판매처</th><th>판매가</th><th>개당 이익</th><th>이익률</th>
+        <th>판매처</th><th>판매가</th><th>제작 수요지</th><th>개당 이익</th><th>이익률</th>
         <th>일 거래량</th><th>권장 수량</th></tr></thead>
       <tbody>${g.rows.map((x, i) => {
         const h = hist7(x.id, x.sp.city || cfg.sellCity, 1);
@@ -1473,6 +1522,20 @@ function renderCircuit(){
             <div class="mut" style="font-size:10px">${
               x.sp.mode === 'order' ? '판매 주문' : '즉시 판매'}</div></td>
           <td>${fmt(x.sell)}${trendTag(h) ? `<div>${trendTag(h)}</div>` : ''}</td>
+          <td style="text-align:left">${(() => {
+            const dc = demandCities(x.rec.cc);
+            if(!dc.length) return `<span class="mut">제작 수요 없음</span>`;
+            const top = dc[0];
+            const hit = x.sp.city === top.city;
+            // 수요 1위 도시에서 팔면 얼마인지 같이 보여줘 비교되게 한다
+            const p = rawPrice(x.id, top.city, 1);
+            const there = p && p.s ? netOf(p.s, 'order') : (p && p.b ? netOf(p.b, 'instant') : NaN);
+            return `<span class="${hit ? 'up' : 'alt2'}">${esc(CITY_KO[top.city])}</span>
+              <span class="mut" style="font-size:10px">${(top.share * 100).toFixed(0)}%</span>
+              <div class="${hit ? 'up' : 'mut'}" style="font-size:10px">${
+                hit ? '판매처와 일치'
+                    : isFinite(there) ? `여기선 실수령 ${fmt(there)}` : '그쪽 시세 없음'}</div>`;
+          })()}</td>
           <td class="up">+${fmt(x.profit)}</td>
           <td class="up">${pct(x.margin)}</td>
           <td class="${!h || !isFinite(h.vol) || h.vol < 20 ? 'stale' : 'mut'}">${
@@ -1485,6 +1548,13 @@ function renderCircuit(){
   <div class="note">
     도시마다 정제 특화가 달라 <b>그 도시에서는 그 자원만</b> +40% 반환을 받습니다.
     각 도시의 첫 줄(초록 배경)이 그 도시에서 가장 이익이 큰 정제품입니다.<br>
+    <b>제작 수요지</b> · 정제 특화 도시는 생산지라 그 재료가 흔하고 쌉니다. 반대로 그 재료를
+    쓰는 제작 특화를 가진 도시는 수요지입니다 — 정제품은 그쪽에 가져가 파는 게 맞습니다.
+    어느 도시가 무엇을 쓰는지는 실제 레시피에서 뽑았습니다
+    (판자→림허스트, 주괴→브릿지워치, 가죽→림허스트, 직물→포트 스털링).
+    <span class="up">초록</span>이면 판매처가 이미 수요 1위 도시와 같고,
+    <span class="alt2">파랑</span>이면 그쪽에서 팔면 실수령이 얼마인지 옆에 적었습니다.
+    <b>석괴는 장비 제작에 쓰이지 않아 제작 수요가 없습니다</b> — 건물·가구용입니다.<br>
     <b>체인</b> 열의 '구매' 는 하위 정제품을 시장에서 사서 한 단계만 정제한 것이고,
     'N단계' 는 아래로 N번 더 직접 정제한 것입니다. 깊게 갈수록 원가는 내려가지만
     자본과 시간이 더 들고, 중간 자원 시세가 비면 계산이 흔들립니다.<br>

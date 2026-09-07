@@ -1071,6 +1071,7 @@ const DAILY_GROUPS = [
   ['방어구', ['plate_armor','plate_helmet','plate_shoes','leather_armor','leather_helmet',
               'leather_shoes','cloth_armor','cloth_helmet','cloth_shoes']],
   ['기타', ['bag','cape','food','potion','tools','gatherergear']],
+  ['도축', ['meat_cow','meat_sheep','meat_pig','meat_goat','meat_chicken','meat_goose']],
 ];
 
 /* 제작 특화 카테고리의 한글 이름 — 요약에 쓴다 */
@@ -1087,6 +1088,8 @@ const CAT_KO = {
   tools:'채집 도구', gatherergear:'채집 장비',
   wood:'판자(목재)', ore:'주괴(광석)', hide:'가죽(피혁)',
   fiber:'직물(섬유)', rock:'석괴(석재)',
+  meat_cow:'소고기', meat_sheep:'양고기', meat_pig:'돼지고기',
+  meat_goat:'염소고기', meat_chicken:'닭고기', meat_goose:'거위고기',
 };
 const dailyLevel = cc => (cfg.dailyCats || {})[cc] || 0;
 const dailyCount = () => Object.keys(cfg.dailyCats || {}).length;
@@ -1318,7 +1321,9 @@ function cfgPanel(rec){
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
         <b style="font-size:12px">오늘의 일일 보너스</b>
         <span class="status">인게임 <b>액티비티</b> 메뉴에서 오늘 뽑힌 카테고리를 확인해 눌러주세요.
-          한 번 누르면 실버(+10%), 두 번이면 골드(+20%), 세 번이면 해제됩니다.</span>
+          한 번 누르면 실버(+10%), 두 번이면 골드(+20%), 세 번이면 해제됩니다.
+          게임은 <b>부위별로 따로</b> 취급합니다 — 판금이라도 갑옷·투구·신발이 각각
+          다른 카테고리이고 표준 보너스 도시도 다릅니다(브릿지워치·포트 스털링·마틀록).</span>
         <button class="mini" data-dailyclear="1">전체 해제</button>
         <button class="mini" data-dailyopen="0">닫기</button>
       </div>

@@ -951,7 +951,6 @@ const CIRCUIT = [
   ['Bridgewatch',   'rock',  '석괴'],
 ];
 let circuitOpen = false, circuitRows = null, circuitInfo = '', circuitBusy = false;
-let circuitCraft = {};   // 도시 → 그 도시 제작 특화로 만들 만한 것들
 
 /* 아티팩트가 들어가는 아이템은 값은 커도 거래가 거의 없다. 카테고리 대표를
    뽑을 때는 아티팩트 없는 기본 아이템을 먼저 본다 — 그쪽이 물량이 돈다. */
@@ -1077,9 +1076,7 @@ async function runCircuit(){
   try{
     const filt = r => (!tierF || r.t === tierF) && (enchF < 0 || (r.e || 0) === enchF);
     const cands = ITEMS.filter(r => r.r && CIRCUIT.some(c => c[1] === r.cc) && filt(r));
-    // 정제 다음 단계(제작 특화)까지 시세를 같이 받아야 '이어서 제작' 이 계산된다
-    const craftCands = ITEMS.filter(r => r.r && CRAFT_CITY[r.cc] && filt(r));
-    const ids = scanIds([...cands, ...craftCands].map(r => r.id), 8);
+    const ids = scanIds(cands.map(r => r.id), 8);
     await loadPrices(ids, PRICE_CITIES, [1], (done, all) => {
       circuitInfo = `시세 ${fmt(done)}/${fmt(all)}종 조회 중…`;
       setStatus(circuitInfo);
@@ -1115,55 +1112,6 @@ async function runCircuit(){
       }
       for(const [c, list] of byCity) await fetchHistory(list, [c], [1]);
     }
-    // 정제 다음 단계 — 이 도시 제작 특화로 뭘 만들어 어디에 팔 수 있는지
-    circuitCraft = {};
-    const keepStation = cfg.station;
-    cfg.station = 'bonus';                       // 제작 특화 도시에서 만든다는 전제
-    const craftIds = new Set();
-    for(const [city] of CIRCUIT){
-      const cats = Object.keys(CRAFT_CITY).filter(cc => CRAFT_CITY[cc] === city);
-      const best = [];
-      for(const cc of cats){
-        let top = null;
-        for(const r of craftCands){
-          if(r.cc !== cc) continue;
-          const u = unitCost(r.id, 0, new Set(), []);
-          if(!isFinite(u.cost) || u.cost <= 0) continue;
-          const here = bestNetAt(r.id, city), bm = bestNetAt(r.id, BLACK_MARKET);
-          const pick = [here, bm].filter(Boolean)
-            .reduce((a, b) => !a || b.net > a.net ? b : a, null);
-          if(!pick) continue;
-          const profit = pick.net - u.cost;
-          const art = usesArtefact(r.id);
-          // 아티팩트 없는 것을 먼저, 같은 급이면 이익 큰 것
-          const better = !top || (top.art && !art) ||
-                         (top.art === art && profit > top.profit);
-          if(better)
-            top = { id: r.id, cc, cost: u.cost, here, bm, profit, art,
-                    margin: profit / u.cost };
-        }
-        if(top){ best.push(top); craftIds.add(top.id); }
-      }
-      circuitCraft[city] = best;
-    }
-    cfg.station = keepStation;
-    if(craftIds.size){
-      const list = [...craftIds];
-      for(const c of [...CIRCUIT.map(x => x[0]), BLACK_MARKET])
-        await fetchHistory(list, [c], [1]);
-      // 거래량을 알고 난 뒤에 정렬한다 — 이익만 보면 거래 없는 아티팩트가 위로 온다
-      for(const [city] of CIRCUIT){
-        const vol = x => {
-          const a = hist7(x.id, city, 1), b = hist7(x.id, BLACK_MARKET, 1);
-          return Math.max(a && isFinite(a.vol) ? a.vol : 0, b && isFinite(b.vol) ? b.vol : 0);
-        };
-        (circuitCraft[city] || []).sort((a, b) => {
-          const va = vol(a) >= 20 ? 1 : 0, vb = vol(b) >= 20 ? 1 : 0;
-          return vb - va || b.profit - a.profit;
-        });
-      }
-    }
-
     circuitRows = win;
     circuitInfo = `정제품 ${fmt(cands.length)}종 중 이익 나는 ${fmt(win.length)}종` +
                   ` · 적자 ${fmt(rows.length - win.length)}종` +
@@ -1639,62 +1587,6 @@ function renderCircuit(){
         </tr>`;
       }).join('')}</tbody></table></div>`
     : `<div class="empty" style="padding:22px">이익 나는 정제품이 없습니다</div>`}
-    ${(() => {
-      const list = (circuitCraft[g.city] || []).slice(0, 5);
-      const cats = Object.keys(CRAFT_CITY).filter(cc => CRAFT_CITY[cc] === g.city)
-        .map(cc => CAT_KO[cc] || cc);
-      if(!list.length) return `<div class="status" style="margin:6px 0 14px">
-        ${esc(CITY_KO[g.city])} 제작 특화: <b>${cats.map(esc).join(' · ')}</b>
-        — 지금 필터 조건에서는 계산할 만한 것이 없습니다</div>`;
-      return `<div class="cfg" style="padding:10px 13px;margin:6px 0 16px">
-        <h3 style="margin-bottom:6px">여기서 이어서 제작하기 <span class="mut"
-          style="font-weight:400;letter-spacing:0">제작 반환 +15%</span></h3>
-        <div class="status" style="margin-bottom:8px">${esc(CITY_KO[g.city])} 제작 특화:
-          <b>${cats.map(esc).join(' · ')}</b> — 방금 정제한 재료를 그대로 써서
-          이 카테고리를 만들 수 있습니다</div>
-        <div style="overflow-x:auto"><table>
-          <thead><tr><th>카테고리</th><th>대표 아이템</th><th>개당 원가</th>
-            <th>${esc(CITY_KO[g.city])}에서 바로</th><th>암시장으로 가면</th>
-            <th>더 나은 쪽</th></tr></thead>
-          <tbody>${list.map(x => {
-            const hv = hist7(x.id, g.city, 1), bv = hist7(x.id, BLACK_MARKET, 1);
-            const cell = (opt, h) => {
-              if(!opt) return `<td class="mut">시세 없음</td>`;
-              const p = opt.net - x.cost;
-              return `<td>${fmt(opt.v)}
-                <div class="${p > 0 ? 'up' : 'dn'}" style="font-size:10px">${
-                  p > 0 ? '+' : ''}${fmt(p)} · ${pct(p / x.cost)}</div>
-                <div class="mut" style="font-size:10px">${
-                  opt.mode === 'order' ? '판매 주문' : '즉시 판매'}${
-                  h && isFinite(h.vol) ? ` · 일 ${fmt(h.vol)}` : ' · 거래량 —'}</div></td>`;
-            };
-            // 어느 쪽이 나은지 — 이익만 보지 않고 거래량이 받쳐주는지도 본다
-            const hp = x.here ? x.here.net - x.cost : -Infinity;
-            const bp = x.bm   ? x.bm.net   - x.cost : -Infinity;
-            const hvol = hv && isFinite(hv.vol) ? hv.vol : 0;
-            const bvol = bv && isFinite(bv.vol) ? bv.vol : 0;
-            let verdict;
-            if(hp <= 0 && bp <= 0) verdict = `<span class="dn">둘 다 적자</span>`;
-            else if(bp > hp && bvol >= hvol)
-              verdict = `<span class="up">암시장</span><div class="mut" style="font-size:10px">이익·물량 모두 우세</div>`;
-            else if(hp > bp && hvol >= bvol)
-              verdict = `<span class="up">${esc(CITY_KO[g.city])}</span><div class="mut" style="font-size:10px">이익·물량 모두 우세</div>`;
-            else if(bp > hp)
-              verdict = `<span class="up">암시장</span><div class="stale" style="font-size:10px">이익은 높지만 물량은 ${esc(CITY_KO[g.city])}가 많음</div>`;
-            else
-              verdict = `<span class="up">${esc(CITY_KO[g.city])}</span><div class="stale" style="font-size:10px">이익은 높지만 물량은 암시장이 많음</div>`;
-            return `<tr data-pick="${esc(x.id)}" data-q="1" style="cursor:pointer">
-              <td>${esc(CAT_KO[x.cc] || x.cc)}</td>
-              <td><div class="mat"><img data-ico="${esc(x.id)}" alt="">
-                <div class="tw"><div class="nm">${esc(nameOf(x.id))}</div></div></div></td>
-              <td>${fmt(x.cost)}</td>
-              ${cell(x.here, hv)}
-              ${cell(x.bm, bv)}
-              <td style="text-align:left">${verdict}</td>
-            </tr>`;
-          }).join('')}</tbody></table></div>
-      </div>`;
-    })()}
   `).join('')}
   <div class="note">
     도시마다 정제 특화가 달라 <b>그 도시에서는 그 자원만</b> +40% 반환을 받습니다.
@@ -1997,6 +1889,46 @@ function renderResult(){
       <div class="card"><div class="k">경유 도시</div>
         <div class="v">${fmt(new Set([...j.stops.map(s => s.city), j.sp.city].filter(Boolean)).size)}</div>
         <div class="n">판매처 포함</div></div>
+    </div>`;
+  })()}
+
+  ${(() => {
+    if(rec.s1 !== 'refinedresources') return '';
+    const dc = demandCities(rec.cc);
+    if(!dc.length) return `<div class="sec">다음 단계</div>
+      <div class="status" style="margin-bottom:14px">${esc(nameOf(sel))}는 장비 제작에
+        쓰이지 않습니다 — 건물·가구용입니다. 제작으로 이어지는 수요가 없습니다.</div>`;
+    // 이미 받아둔 전 도시 시세만 쓴다 (추가 조회 없음)
+    const priced = dc.map(d => ({ ...d, best: bestNetAt(sel, d.city, 1) }));
+    const top = priced.reduce((a, b) =>
+      (b.best && (!a.best || b.best.net > a.best.net)) ? b : a, priced[0]);
+    return `<div class="sec">다음 단계 — 이 재료를 어디로 가져가나 <span class="mut"
+      style="font-weight:400;letter-spacing:0">추가 조회 없이 이미 받은 시세로 표시</span></div>
+    <div style="overflow-x:auto"><table>
+      <thead><tr><th>도시</th><th>이 재료 소모 비중</th><th>여기서 만들 수 있는 것</th>
+        <th>이 재료 실수령</th></tr></thead>
+      <tbody>${priced.map(d => {
+        const cats = Object.keys(CRAFT_CITY).filter(cc => CRAFT_CITY[cc] === d.city)
+          .map(cc => CAT_KO[cc] || cc);
+        const isTop = d.city === top.city && d.best;
+        return `<tr${isTop ? ' style="background:#1e2a20"' : ''}>
+          <td><b>${esc(CITY_KO[d.city])}</b>${
+            d.city === REFINE_CITY[rec.cc]
+              ? ' <span class="tag">여기서 정제</span>' : ''}</td>
+          <td>${(d.share * 100).toFixed(0)}%</td>
+          <td style="text-align:left">${cats.map(esc).join(' · ')}</td>
+          <td>${d.best
+            ? `${fmt(d.best.net)}<div class="mut" style="font-size:10px">${
+                d.best.mode === 'order' ? '판매 주문' : '즉시 판매'} ${fmt(d.best.v)}</div>`
+            : '<span class="stale">시세 없음</span>'}</td>
+        </tr>`;
+      }).join('')}</tbody></table></div>
+    <div class="note" style="border:0;padding-top:8px;margin-top:0">
+      ${esc(nameOf(sel))}는 <b>${esc(CITY_KO[REFINE_CITY[rec.cc]])}</b>에서 정제 보너스(+40%)를
+      받고, 위 도시들의 제작자들이 사갑니다. 소모 비중은 그 도시 제작 특화 레시피가 이 계열을
+      얼마나 쓰는지입니다.
+      ${top.best ? `실수령이 가장 큰 곳은 <b>${esc(CITY_KO[top.city])}</b>(${fmt(top.best.net)})입니다.` : ''}
+      만들 물건의 실제 손익은 그 아이템을 골라 보거나 <b>수익 후보 탐색</b>으로 확인하세요.
     </div>`;
   })()}
 

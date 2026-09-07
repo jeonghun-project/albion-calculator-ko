@@ -1088,18 +1088,22 @@ function craftDemand(){
   return acc;
 }
 /* 일일 보너스가 걸릴 수 있는 생산 카테고리 — 정제 5계열 + 제작 특화 + 요리·연금 */
-/* 게임의 표준 도시 보너스는 부위별(판금 갑옷·투구·신발이 서로 다른 도시)인데,
-   일일 보너스 추첨은 '판금' 처럼 재질 단위로 뜬다. 그래서 묶음 버튼을 기본으로 주고
-   부위별 버튼은 보조로 남긴다 — 어느 단위로 뜨든 그대로 입력할 수 있게. */
+/* 일일 보너스 추첨은 방어구도 부위 단위로 뜬다 — '판금' 이 통째로 걸리는 게 아니라
+   판금 갑옷 · 판금 투구 · 판금 신발이 각각 따로 뽑힌다. 그래서 부위별 버튼으로 준다.
+   표준 도시 보너스도 부위별로 갈리므로(판금 갑옷 브릿지워치 · 투구 포트 스털링 ·
+   신발 마틀록) 단위가 서로 맞는다. */
 const DAILY_GROUPS = [
   ['정제', [
     ['판자', ['wood']], ['주괴', ['ore']], ['가죽(피혁)', ['hide']],
     ['직물', ['fiber']], ['석괴', ['rock']],
   ]],
   ['방어구', [
-    ['판금', ['plate_armor','plate_helmet','plate_shoes']],
-    ['가죽 갑옷', ['leather_armor','leather_helmet','leather_shoes']],
-    ['천 갑옷', ['cloth_armor','cloth_helmet','cloth_shoes']],
+    ['판금 갑옷', ['plate_armor']], ['판금 투구', ['plate_helmet']],
+    ['판금 신발', ['plate_shoes']],
+    ['가죽 갑옷', ['leather_armor']], ['가죽 투구', ['leather_helmet']],
+    ['가죽 신발', ['leather_shoes']],
+    ['천 갑옷', ['cloth_armor']], ['천 투구', ['cloth_helmet']],
+    ['천 신발', ['cloth_shoes']],
   ]],
   ['무기', [
     ['한손검·양손검', ['sword']], ['도끼', ['axe']], ['메이스', ['mace']],
@@ -1382,9 +1386,9 @@ function cfgPanel(rec){
         <b style="font-size:12px;white-space:nowrap;flex-shrink:0">오늘의 일일 보너스</b>
         <span class="status">인게임 <b>액티비티</b> 메뉴에서 오늘 뽑힌 카테고리를 확인해 눌러주세요.
           한 번 누르면 실버(+10%), 두 번이면 골드(+20%), 세 번이면 해제됩니다.
-          일일 보너스는 <b>판금·가죽·천</b> 처럼 재질 단위로 뜨므로 묶음 버튼 하나면 됩니다
-          (안쪽 부위 전부에 적용). 표준 도시 보너스는 부위별로 갈리는데
-          (판금 갑옷 브릿지워치 · 투구 포트 스털링 · 신발 마틀록) 그건 별개로 계산됩니다.</span>
+          방어구는 <b>갑옷 · 투구 · 신발</b> 이 각각 따로 뽑히므로 걸린 부위만 눌러주세요.
+          표준 도시 보너스(판금 갑옷 브릿지워치 · 투구 포트 스털링 · 신발 마틀록)는
+          별개로 계산됩니다.</span>
         <button class="mini" data-dailyclear="1">전체 해제</button>
         <button class="mini" data-dailyopen="0">닫기</button>
       </div>

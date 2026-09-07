@@ -642,15 +642,43 @@ function neededIds(){
   for(const n of nodes){ s.add(n.id); n.kids.forEach(k => s.add(k.id)); }
   return [...s];
 }
-/** 시세를 90개씩 끊어 받아 캐시에 넣는다. onProgress 로 진행률을 보고한다. */
-async function loadPrices(ids, cities, qualities, onProgress){
+/* 시세 API 는 URL 8KB(8192바이트)에서 400 을 뱉는다. id 길이가 제각각이라
+   개수로 자르면 손해라, URL 길이를 재서 넣을 수 있는 만큼 담는다.
+   실측으로 전 도시·전 품질 조건에서 8,169자(155개)는 통과하고 8,441자는 막힌다. */
+const URL_BUDGET = 7600;
+/** 같은 (아이템·도시·품질) 을 이 시간 안에 이미 받았으면 다시 받지 않는다 */
+const PRICE_TTL_MS = 5 * 60 * 1000;
+const priceAt = new Map();   // pkey -> 받아온 시각
+
+function priceBatches(ids, base, qs){
+  const out = [];
+  let cur = [], len = base.length + qs.length;
+  for(const id of ids){
+    const enc = encodeURIComponent(id);
+    if(cur.length && len + enc.length + 1 > URL_BUDGET){ out.push(cur); cur = []; len = base.length + qs.length; }
+    cur.push(enc); len += enc.length + 1;
+  }
+  if(cur.length) out.push(cur);
+  return out;
+}
+
+/** 시세를 URL 한도까지 묶어 받아 캐시에 넣는다. onProgress 로 진행률을 보고한다. */
+async function loadPrices(ids, cities, qualities, onProgress, force){
   const base = `https://${cfg.server}.albion-online-data.com/api/v2/stats/prices/`;
   const qs   = `?locations=${cities.map(encodeURIComponent).join(',')}` +
                `&qualities=${qualities.join(',')}`;
-  let got = 0;
-  for(let i = 0; i < ids.length; i += 90){
-    const chunk = ids.slice(i, i + 90).map(encodeURIComponent).join(',');
-    const res = await fetch(base + chunk + qs);
+  const now = Date.now();
+  const want = force ? ids : ids.filter(id =>
+    !cities.every(c => qualities.every(q => {
+      const t = priceAt.get(pkey(id, c, q));
+      return t && now - t < PRICE_TTL_MS;
+    })));
+  if(!want.length){ if(onProgress) onProgress(ids.length, ids.length); return 0; }
+
+  const batches = priceBatches(want, base, qs);
+  let got = 0, done = 0;
+  for(const chunk of batches){
+    const res = await fetch(base + chunk.join(',') + qs);
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
     for(const p of await res.json()){
       prices.set(pkey(p.item_id, p.city, p.quality), {
@@ -660,12 +688,19 @@ async function loadPrices(ids, cities, qualities, onProgress){
       });
       got++;
     }
-    if(onProgress) onProgress(Math.min(i + 90, ids.length), ids.length);
+    // 응답이 없던 조합도 받아온 것으로 기록해 재요청을 막는다
+    const t = Date.now();
+    for(const enc of chunk){
+      const id = decodeURIComponent(enc);
+      for(const c of cities) for(const q of qualities) priceAt.set(pkey(id, c, q), t);
+    }
+    done += chunk.length;
+    if(onProgress) onProgress(Math.min(done, want.length), want.length);
   }
   return got;
 }
 
-async function fetchPrices(){
+async function fetchPrices(forceFetch){
   if(fetching) return;
   fetching = true;
   setStatus('시세 불러오는 중…');
@@ -673,7 +708,7 @@ async function fetchPrices(){
   const cities = PRICE_CITIES;
   let got = 0, err = null;
   try{
-    got = await loadPrices(ids, cities, [1,2,3,4,5]);
+    got = await loadPrices(ids, cities, [1,2,3,4,5], null, forceFetch);
     lastFetch = new Date();
     await fetchHistory(ids, cities, [...new Set([1, +cfg.quality])]);
   }catch(e){ err = e.message; }
@@ -692,8 +727,9 @@ async function fetchHistory(ids, cities, qualities){
   const qs = `?locations=${cities.map(encodeURIComponent).join(',')}` +
              `&qualities=${qualities.join(',')}&time-scale=24`;
   try{
-    for(let i = 0; i < want.length; i += 90){
-      const chunk = want.slice(i, i + 90).map(encodeURIComponent).join(',');
+    // 시세와 같은 이유로 URL 한도까지 묶는다 (90개씩 자르면 요청이 몇 배가 된다)
+    for(const part of priceBatches(want, base, qs)){
+      const chunk = part.join(',');
       const res = await fetch(base + chunk + qs);
       if(!res.ok) throw new Error(`HTTP ${res.status}`);
       for(const e of await res.json()){
@@ -2130,7 +2166,10 @@ document.addEventListener('click', e => {
   if(b.dataset.scanopen !== undefined){   // 아이템 계산 → 보관해 둔 탐색 결과
     scanOpen = true; renderScan(); return;
   }
-  if(b.id === 'refresh'){ circuitOpen ? runCircuit() : scanOpen ? runScan() : fetchPrices(); return; }
+  if(b.id === 'refresh'){
+    priceAt.clear(); hist.clear();          // 새로고침은 캐시를 버리고 다시 받는다
+    circuitOpen ? runCircuit() : scanOpen ? runScan() : fetchPrices(true); return;
+  }
   const seg = b.closest('[data-seg]');
   if(seg){ cfg[seg.dataset.seg] = b.dataset.v; saveCfg(); render(); return; }
 });
@@ -2138,7 +2177,8 @@ document.addEventListener('click', e => {
 document.addEventListener('input', e => {
   const el = e.target;
   if(el.id === 'q'){ query = el.value.trim(); later(renderSidebar, 120); return; }
-  if(el.id === 'server'){ cfg.server = el.value; saveCfg(); prices.clear(); fetchPrices(); return; }
+  if(el.id === 'server'){ cfg.server = el.value; saveCfg();
+    prices.clear(); priceAt.clear(); hist.clear(); fetchPrices(); return; }
   if(el.dataset.cfg){
     const k = el.dataset.cfg;
     cfg[k] = el.type === 'checkbox' ? el.checked

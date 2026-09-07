@@ -142,6 +142,10 @@ td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
 .tag.nr{background:#3a2b2b;color:var(--dn)}
 .stale{color:var(--warn)}
 .tag.alt{background:#2a3550;color:#8fb4e8}
+.tag.q2{background:#24402c;color:#8fd0a0}
+.tag.q3{background:#1f3a4a;color:#8ec4dd}
+.tag.q4{background:#3a2f4d;color:#c0a6e0}
+.tag.q5{background:#4a3a1f;color:#e0c07a}
 .alt2{color:#8fb4e8}
 .hint{margin-top:5px;font-size:11.5px;color:#e8d5a8;background:#3a3320;
   border:1px solid #5c5030;border-radius:5px;padding:6px 9px;line-height:1.6}
@@ -428,6 +432,14 @@ const PRICE_CITIES = [...CITIES.map(c => c[0]), BLACK_MARKET];
 function rawPrice(id, city, q = 1){
   return prices.get(pkey(id, city, q)) || null;
 }
+/** 그 도시·그 품질에 실제로 값이 있는지 (일반 품질로 대체된 경우와 구분) */
+function rawPriceAt(id, city, q){
+  if(!city) return null;
+  const p = prices.get(pkey(id, city, q));
+  return p && (p.s || p.b) ? p : null;
+}
+const QUALITIES  = [1, 2, 3, 4, 5];
+const QUALITY_KO = { 1:'일반', 2:'좋음', 3:'뛰어남', 4:'훌륭함', 5:'걸작' };
 /** 값이 있는 도시 중 가장 싼(재료) / 가장 비싼(완제품) 곳을 찾는다 */
 function bestCity(id, q, field, cheapest){
   let best = null;
@@ -471,13 +483,14 @@ function buyPrice(id){
   return { v: NaN, src: 'none' };
 }
 /** 완제품 판매가 — v 는 표시가, net 은 세후 실수령 */
-function sellPrice(id){
+function sellPrice(id, quality){
+  const q = +(quality ?? cfg.quality);
   if(override.has('SELL:' + id)){
     const v = +override.get('SELL:' + id);
     // 자동 모드에서도 어느 판매처 기준인지는 남겨야 거래량·피크가를 계속 볼 수 있다
     let city = cfg.sellCity, mode = cfg.sellMode;
     if(isAuto()){
-      const opts = venueOptions(id);
+      const opts = venueOptions(id, q);
       const best = opts.length ? opts.reduce((a, b) => b.net > a.net ? b : a) : null;
       city = best ? best.city : null;
       mode = best ? best.mode : cfg.sellMode;
@@ -486,20 +499,20 @@ function sellPrice(id){
   }
   // 자동: 실수령이 가장 큰 (도시 × 판매방식) 을 고른다
   if(isAuto()){
-    const opts = venueOptions(id);
+    const opts = venueOptions(id, q);
     if(!opts.length) return { v: NaN, net: NaN, src:'none' };
     const best = opts.reduce((a, b) => b.net > a.net ? b : a);
     return { ...best, src: best.mode, auto: true };
   }
   const instant = cfg.sellMode === 'instant';
   const field = instant ? 'b' : 's', dfield = instant ? 'bd' : 'sd';
-  const p = rawPrice(id, cfg.sellCity, cfg.quality) || rawPrice(id, cfg.sellCity, 1);
+  const p = rawPrice(id, cfg.sellCity, q) || rawPrice(id, cfg.sellCity, 1);
   if(p && p[field])
     return { v: p[field], net: netOf(p[field], cfg.sellMode), src: cfg.sellMode,
              date: p[dfield], city: cfg.sellCity, mode: cfg.sellMode };
   // 암시장은 가격 성격이 달라 royal 도시로 대체하지 않는다
   if(!cfg.crossCity || isBM(cfg.sellCity)) return { v: NaN, net: NaN, src:'none' };
-  const alt = bestCity(id, +cfg.quality, field, false);   // 가장 비싼 도시
+  const alt = bestCity(id, q, field, false);   // 가장 비싼 도시
   if(!alt) return { v: NaN, net: NaN, src:'none' };
   return { v: alt.v, net: netOf(alt.v, cfg.sellMode), src: cfg.sellMode,
            date: alt.p[dfield], city: alt.city, mode: cfg.sellMode, alt: true };
@@ -511,9 +524,9 @@ const setupFee = () => feeOf(cfg.sellMode);
 const netOf = (gross, mode) => gross * (1 - salesTax() - feeOf(mode));
 
 /** 팔 수 있는 모든 (도시 × 판매방식) 후보와 각각의 실수령 */
-function venueOptions(id){
+function venueOptions(id, quality){
   const rec = IX.get(id);
-  const q = +cfg.quality;
+  const q = +(quality ?? cfg.quality);
   const out = [];
   const add = (city, p) => {
     if(!p) return;
@@ -746,7 +759,7 @@ let scanSort = 'profit';   // profit | margin | vol | safe
 /** 결과 정렬 — 거래량과 '7일 평균 대비' 는 이익률만큼이나 중요한 판단 재료다 */
 function scanSorted(){
   if(!scanRows) return [];
-  const h = x => hist7(x.id, x.sp.city || cfg.sellCity, +cfg.quality);
+  const h = x => hist7(x.id, x.sp.city || cfg.sellCity, x.q || 1);
   const vol = x => { const g = h(x); return g && isFinite(g.vol) ? g.vol : -1; };
   const dev = x => {
     const g = h(x);
@@ -803,7 +816,8 @@ async function runScan(){
   try{
     const ids    = scanIds(cands.map(r => r.id));
     const cities = PRICE_CITIES;
-    const quals  = [...new Set([1, +cfg.quality])];
+    // 품질은 걸러내지 않고 전부 받아 결과에서 구분한다 (재료는 품질이 없어 1만 쓴다)
+    const quals  = QUALITIES;
     await loadPrices(ids, cities, quals, (done, all) => {
       scanInfo = `시세 ${fmt(done)}/${fmt(all)}종 조회 중…`;
       setStatus(scanInfo);
@@ -829,46 +843,56 @@ async function runScan(){
     for(const rec of cands){
       const r = recipeOf(rec.id);
       if(!r) continue;
-      const u  = unitCost(rec.id, 0, new Set(), []);
-      const sp = sellPrice(rec.id);
+      // 원가는 품질과 무관하다 — 재료에는 품질이 없다
+      const u = unitCost(rec.id, 0, new Set(), []);
       if(!isFinite(u.cost) || u.cost <= 0) continue;
-      if(!isFinite(sp.v) || !sp.v){
-        noSell++;
-        if(!isAuto() && venueOptions(rec.id).length) rescuable++;
-        continue;
+      const mult = matMult(rec);
+      const mats = r.m.map(([mid, cnt, nr]) => ({
+        id: mid,
+        need: (cnt / r.a) * (noReturn(mid, nr) ? 1 : mult),
+        unit: unitCost(mid, 1, new Set(), []).cost,
+      }));
+      let any = false;
+      for(const q of QUALITIES){
+        const sp = sellPrice(rec.id, q);
+        if(!isFinite(sp.v) || !sp.v) continue;
+        // 그 품질에 값이 없어 일반으로 대체된 행은 1번과 중복이라 버린다
+        if(q !== 1 && !rawPriceAt(rec.id, sp.city, q)) continue;
+        any = true;
+        const profit = sp.net - u.cost;
+        rows.push({
+          id: rec.id, rec, q,
+          mats, matCost: u.cost - u.fee,
+          fee: u.fee, cost: u.cost, sell: sp.v, sp,
+          profit, margin: profit / u.cost,
+          focus: u.focus,
+          perFocus: u.focus > 0 ? profit / u.focus : NaN,
+        });
       }
-      const profit = sp.net - u.cost;
-      const mult   = matMult(rec);
-      rows.push({
-        id: rec.id, rec,
-        mats: r.m.map(([mid, cnt, nr]) => ({
-          id: mid,
-          need: (cnt / r.a) * (noReturn(mid, nr) ? 1 : mult),
-          unit: unitCost(mid, 1, new Set(), []).cost,
-        })),
-        matCost: u.cost - u.fee,
-        fee: u.fee, cost: u.cost, sell: sp.v, sp,
-        profit, margin: profit / u.cost,
-        focus: u.focus,
-        perFocus: u.focus > 0 ? profit / u.focus : NaN,
-      });
+      if(!any){
+        noSell++;
+        if(!isAuto() && venueOptions(rec.id, 1).length) rescuable++;
+      }
     }
     rows.sort((a, b) => b.profit - a.profit);
     let pos = rows.filter(x => x.profit > 0 && x.profit >= (cfg.minProfit || 0));
     // 거래량·평균比 판정에 필요한 추이는 상위권만 받는다 (요청 2건 이내)
     const head = pos.slice(0, 150);
     if(head.length){
+      // 도시별로 묶고 필요한 품질은 한 요청에 함께 보낸다 (도시×품질로 쪼개면 요청이 몇 배가 된다)
       const byCity = new Map();
       for(const x of head){
         const c = x.sp.city || cfg.sellCity;
-        if(!byCity.has(c)) byCity.set(c, []);
-        byCity.get(c).push(x.id);
+        if(!byCity.has(c)) byCity.set(c, { ids: new Set(), qs: new Set() });
+        byCity.get(c).ids.add(x.id);
+        byCity.get(c).qs.add(x.q || 1);
       }
-      for(const [c, list] of byCity) await fetchHistory(list, [c], quals);
+      for(const [c, v] of byCity)
+        await fetchHistory([...v.ids], [c], [...v.qs]);
     }
     let cut = 0;
     const kept = head.filter(x => {
-      const h = hist7(x.id, x.sp.city || cfg.sellCity, +cfg.quality);
+      const h = hist7(x.id, x.sp.city || cfg.sellCity, x.q || 1);
       if(cfg.minVol > 0 && (!h || !isFinite(h.vol) || h.vol < cfg.minVol)){ cut++; return false; }
       if(cfg.maxDev > 0){
         if(!h || !isFinite(h.avg) || !h.avg){ cut++; return false; }
@@ -878,10 +902,11 @@ async function runScan(){
     });
     const win = kept.slice(0, 60);
     scanRows = win;
-    scanInfo = `${fmt(cands.length)}종 중 ${fmt(win.length)}종` +
-               ` · 적자 ${fmt(rows.length - pos.length)}종` +
-               (cut ? ` · 임계값 미달 ${fmt(cut)}종` : '') +
-               ` · 시세 없음 ${fmt(cands.length - rows.length)}종 제외`;
+    const shown = new Set(win.map(x => x.id)).size;
+    scanInfo = `후보 ${fmt(cands.length)}종 → ${fmt(shown)}종 ${fmt(win.length)}행` +
+               ` · 적자 ${fmt(rows.length - pos.length)}행` +
+               (cut ? ` · 임계값 미달 ${fmt(cut)}행` : '') +
+               ` · 시세 없음 ${fmt(noSell)}종 제외`;
     // 판매처·판매방식 때문에 대량으로 빠졌으면 어떻게 살리는지 알려준다
     scanHint = rescuable >= 5
       ? `판매 시세가 없어 빠진 ${fmt(noSell)}종 중 <b>${fmt(rescuable)}종</b>은 다른 판매처나 판매 방식에서는 값이 있습니다.` +
@@ -1164,23 +1189,25 @@ function renderScan(){
   <div style="overflow-x:auto">
   <table>
     <thead><tr>
-      <th>아이템</th><th>재료 (1개당 실소모)</th><th>재료비</th><th>수수료</th>
+      <th>아이템</th><th>품질</th><th>재료 (1개당 실소모)</th><th>재료비</th><th>수수료</th>
       <th>개당 원가</th><th>판매처</th><th>판매가</th><th>7일 평균</th><th>최근 추세</th>
       <th>개당 이익</th><th>이익률</th>${cfg.focus ? '<th>집중당</th>' : ''}
       <th>일 거래량</th><th>권장 수량</th><th>28일 피크가</th>
     </tr></thead>
     <tbody>
     ${scanSorted().map(x => {
-      const h = hist7(x.id, x.sp.city || cfg.sellCity, +cfg.quality);
+      const h = hist7(x.id, x.sp.city || cfg.sellCity, x.q || 1);
       const thin = !h || !isFinite(h.vol) || h.vol < 20;
       const dev = h && isFinite(h.avg) && h.avg ? x.sell / h.avg - 1 : null;
       const spike = dev !== null && Math.abs(dev) >= 0.3;
-      return `<tr data-pick="${esc(x.id)}" style="cursor:pointer">
+      return `<tr data-pick="${esc(x.id)}" data-q="${x.q}" style="cursor:pointer">
         <td><div class="mat">
           <img data-ico="${esc(x.id)}" alt="">
           <div class="tw"><div class="nm">${esc(nameOf(x.id))}</div>
             <div class="id">${tierLabel(x.rec)} · ${esc(x.id)}</div></div>
         </div></td>
+        <td>${x.q > 1 ? `<span class="tag q${x.q}">${QUALITY_KO[x.q]}</span>`
+                      : `<span class="mut">일반</span>`}</td>
         <td style="text-align:left">${x.mats.map(m => `
           <div class="mat" style="gap:5px;margin:1px 0">
             <img data-ico="${esc(m.id)}" alt="" style="width:20px;height:20px">
@@ -1235,6 +1262,11 @@ function renderScan(){
     <span class="up">▲</span> 면 오르는 중이라 지금 만들 만하고,
     <span class="dn">▼</span> 면 완성될 즈음 더 떨어져 있을 수 있습니다.
     마지막 체결이 3일 이상 지났으면 며칠 전인지 함께 표시하고 색을 죽입니다.<br>
+    <b>품질</b>은 걸러내지 않고 시세가 있는 품질을 모두 따로 계산해 보여줍니다 —
+    같은 아이템이 품질별로 여러 줄 나올 수 있습니다. 원가는 품질과 무관하고
+    (재료에는 품질이 없습니다) 판매가·거래량·피크가만 갈립니다.
+    행을 누르면 그 품질로 상세 계산에 들어갑니다.
+    위 '제작 조건' 의 완제품 품질은 상세 계산에만 적용됩니다.<br>
     <b>권장 수량</b>은 하루 거래량의 ${cfg.sellShare}% 입니다. 하루 100개 팔리는 아이템에
     100개를 한 번에 걸면 시장을 눌러버려 악성 재고가 됩니다. 통상 10~20% 선을 지킵니다.<br>
     <b>28일 피크가</b>는 최근 4주 중 가장 높게 체결된 날의 가격입니다(거래가 한두 건뿐인 날은 제외).
@@ -1537,6 +1569,7 @@ document.addEventListener('click', e => {
   const pick = e.target.closest('[data-pick]');
   if(pick && !b){
     sel = pick.dataset.pick; localStorage.setItem('ao_sel', sel);
+    if(pick.dataset.q){ cfg.quality = +pick.dataset.q; saveCfg(); }
     scanOpen = false; recipePick.clear();
     document.getElementById('main').scrollTop = 0;
     render(); fetchPrices(); return;

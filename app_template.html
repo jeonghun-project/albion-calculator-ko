@@ -1283,9 +1283,24 @@ const lgId   = () => Date.now().toString(36) + Math.random().toString(36).slice(
 const dayOf  = ts => new Date(ts).toLocaleDateString('sv-SE');   // YYYY-MM-DD (로컬)
 const today  = () => dayOf(Date.now());
 
-function addCraft(item, qty, unit, memo){
-  LEDGER.crafts.push({ k: lgId(), item, qty: +qty, unit: +unit, ts: Date.now(), memo: memo || '' });
+function addCraft(item, qty, unit, memo, cond){
+  LEDGER.crafts.push({ k: lgId(), item, qty: +qty, unit: +unit, ts: Date.now(),
+                       memo: memo || '', cond: cond || '' });
   saveLedger();
+}
+/** 지금 원가가 어떤 조건에서 나온 값인지 — 나중에 장부를 되짚을 때 쓴다 */
+function craftCond(id){
+  const rec = IX.get(id), r = recipeOf(id);
+  const st = { island:'섬', city:'도시', bonus:'보너스 도시', hideout:'은신처' }[cfg.station] || cfg.station;
+  const ovr = r ? r.m.filter(m => override.has(m[0])).length : 0;
+  return [
+    `재료 ${CITY_KO[cfg.buyCity] || cfg.buyCity}`,
+    cfg.buyMode === 'instant' ? '즉시구매' : '구매주문',
+    st, cfg.focus ? '집중' : '집중없음',
+    `반환 ${pct(returnRate(rec))}`,
+    r && r.up ? '인챈트 경로' : null,
+    ovr ? `직접입력 ${ovr}종` : null,
+  ].filter(Boolean).join(' · ');
 }
 function addSale(item, qty, price, mode, premium, memo){
   const rate = (premium ? 0.04 : 0.08) + (mode === 'order' ? 0.025 : 0);
@@ -1863,7 +1878,8 @@ function renderLedger(){
       <td>${kind === 'sale' ? fmt(e.price) : fmt(e.unit)}</td>
       <td>${fmt(net)}${kind === 'sale'
         ? ` <span class="tag">세 ${pct(e.rate)}</span>` : ''}</td>
-      <td style="text-align:left"><span class="mut">${esc(e.memo || '')}</span></td>
+      <td style="text-align:left"><span class="mut">${esc(e.memo || '')}${
+        e.cond ? `${e.memo ? ' · ' : ''}<span style="font-size:10px">${esc(e.cond)}</span>` : ''}</span></td>
       <td style="text-align:center"><button class="mini"
         data-lgdel="${kind}:${esc(e.k)}">삭제</button></td>
     </tr>`; }).join('');
@@ -1871,7 +1887,7 @@ function renderLedger(){
   const lists = `
   <div class="sec">제작 기록 ${fmt(LEDGER.crafts.length)}건</div>
   ${LEDGER.crafts.length ? `<table><thead><tr><th>시각</th><th>아이템</th><th>수량</th>
-    <th>개당 원가</th><th>총 원가</th><th>메모</th><th></th></tr></thead>
+    <th>개당 원가</th><th>총 원가</th><th>메모 · 당시 조건</th><th></th></tr></thead>
     <tbody>${rowsOf(LEDGER.crafts, 'craft')}</tbody></table>`
     : '<div class="mut" style="padding:6px 2px">아직 없습니다.</div>'}
 
@@ -2136,8 +2152,8 @@ function renderResult(){
     ${scanRows && scanRows.length
       ? `<button class="btn" data-scanopen="1">◀ 탐색 결과 ${fmt(scanRows.length)}종</button>`
       : `<button class="btn" data-scanrun="1" title="왼쪽 목록 조건(카테고리·티어·인챈트·검색)으로 후보를 찾습니다">수익 후보 탐색</button>`}
-    <button class="btn" data-ledgeradd="1" ${isFinite(c.unit) ? '' : 'disabled'}
-      title="지금 계산된 개당 원가로 ${fmt(c.qty)}개를 장부에 적습니다">장부에 제작 기록</button>
+    <button class="btn pri" data-ledgeradd="1" ${isFinite(c.unit) ? '' : 'disabled'}
+      title="지금 조건·재료값 그대로 개당 ${fmt(c.unit)} × ${fmt(c.qty)}개를 장부에 박습니다">오늘 생산 확정</button>
     <button class="btn" data-ledgeropen="1">장부</button>
   </div>
 
@@ -2561,7 +2577,7 @@ document.addEventListener('click', e => {
   if(b.dataset.ledgeradd !== undefined){
     const c = calc();
     if(!c || !isFinite(c.unit)) return;
-    addCraft(sel, c.qty, c.unit, `${CITY_KO[cfg.buyCity] || ''} 재료`);
+    addCraft(sel, c.qty, c.unit, '', craftCond(sel));
     ledgerOpen = true; ledgerMsg =
       `${nameOf(sel)} ${fmtQ(c.qty)}개를 개당 ${fmt(c.unit)} (총 ${fmt(c.cost)}) 로 적었습니다.`;
     renderLedger(); return;

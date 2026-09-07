@@ -169,6 +169,7 @@ td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
 .mini.on{background:var(--acc);border-color:var(--acc);color:#1a1408;font-weight:700}
 .mini.lvS{background:#9aa4b8;border-color:#9aa4b8;color:#14171d;font-weight:700}
 .mini.lvG{background:var(--acc);border-color:var(--acc);color:#1a1408;font-weight:700}
+.mini.lvM{background:#4a3a1f;border-color:var(--acc);color:var(--acc2)}
 
 .sec{margin:18px 0 8px;font-size:11px;color:var(--tx3);font-weight:600;letter-spacing:.06em;
   display:flex;align-items:center;gap:8px}
@@ -778,6 +779,26 @@ async function fetchHistory(ids, cities, qualities){
 }
 const hist7 = (id, city, q = 1) => hist.get(pkey(id, city, q)) || null;
 
+/** 이 아이템 한 바퀴에 들러야 하는 도시 — 적을수록 빨리 돈다.
+   재료를 사는 곳, 정제·제작하는 곳(특화 도시), 파는 곳을 합쳐 센다. */
+function routeCities(id, sp){
+  const set = new Set();
+  const nodes = [];
+  unitCost(id, 0, new Set(), nodes);
+  for(const n of nodes){
+    const r = IX.get(n.id);
+    const made = r && (REFINE_CITY[r.cc] || CRAFT_CITY[r.cc]);
+    if(made) set.add(made);
+    for(const k of n.kids){
+      if(nodes.some(x => x.id === k.id)) continue;   // 직접 만드는 건 위에서 셈
+      const bp = buyPrice(k.id);
+      if(bp.city) set.add(bp.city);
+    }
+  }
+  if(sp && sp.city) set.add(sp.city);
+  return [...set];
+}
+
 /** 하루 거래량의 일부만 걸어야 시장을 흔들지 않고 털린다 (통상 10~20%) */
 function suggestQty(h){
   if(!h || !isFinite(h.vol) || h.vol <= 0) return NaN;
@@ -829,6 +850,10 @@ function scanSorted(){
   else if(scanSort === 'focus') rows.sort((a,b) =>
     (isFinite(b.perFocus) ? b.perFocus : -Infinity) - (isFinite(a.perFocus) ? a.perFocus : -Infinity));
   else if(scanSort === 'vol') rows.sort((a,b) => vol(b) - vol(a));
+  else if(scanSort === 'near'){
+    // 들를 도시가 적은 것부터, 같으면 이익 큰 것 — 한 바퀴를 빨리 돌 수 있는 순서
+    rows.sort((a, b) => (a.cities || []).length - (b.cities || []).length || b.profit - a.profit);
+  }
   else if(scanSort === 'trend'){
     const tr = x => { const g = h(x); return g && isFinite(g.trend) ? g.trend : -Infinity; };
     rows.sort((a,b) => tr(b) - tr(a));
@@ -939,7 +964,7 @@ async function runScan(){
         any = true;
         const profit = sp.net - u.cost;
         rows.push({
-          id: rec.id, rec, q,
+          id: rec.id, rec, q, cities: routeCities(rec.id, sp),
           mats, matCost: u.cost - u.fee,
           fee: u.fee, cost: u.cost, sell: sp.v, sp,
           profit, margin: profit / u.cost,
@@ -1063,15 +1088,34 @@ function craftDemand(){
   return acc;
 }
 /* 일일 보너스가 걸릴 수 있는 생산 카테고리 — 정제 5계열 + 제작 특화 + 요리·연금 */
+/* 게임의 표준 도시 보너스는 부위별(판금 갑옷·투구·신발이 서로 다른 도시)인데,
+   일일 보너스 추첨은 '판금' 처럼 재질 단위로 뜬다. 그래서 묶음 버튼을 기본으로 주고
+   부위별 버튼은 보조로 남긴다 — 어느 단위로 뜨든 그대로 입력할 수 있게. */
 const DAILY_GROUPS = [
-  ['정제', ['wood', 'ore', 'hide', 'fiber', 'rock']],
-  ['무기', ['sword','axe','mace','hammer','spear','dagger','quarterstaff','knuckles',
-            'bow','crossbow','firestaff','froststaff','arcanestaff','holystaff',
-            'naturestaff','cursestaff','shapeshifterstaff','offhand']],
-  ['방어구', ['plate_armor','plate_helmet','plate_shoes','leather_armor','leather_helmet',
-              'leather_shoes','cloth_armor','cloth_helmet','cloth_shoes']],
-  ['기타', ['bag','cape','food','potion','tools','gatherergear']],
-  ['도축', ['meat_cow','meat_sheep','meat_pig','meat_goat','meat_chicken','meat_goose']],
+  ['정제', [
+    ['판자', ['wood']], ['주괴', ['ore']], ['가죽(피혁)', ['hide']],
+    ['직물', ['fiber']], ['석괴', ['rock']],
+  ]],
+  ['방어구', [
+    ['판금', ['plate_armor','plate_helmet','plate_shoes']],
+    ['가죽 갑옷', ['leather_armor','leather_helmet','leather_shoes']],
+    ['천 갑옷', ['cloth_armor','cloth_helmet','cloth_shoes']],
+  ]],
+  ['무기', [
+    ['한손검·양손검', ['sword']], ['도끼', ['axe']], ['메이스', ['mace']],
+    ['해머', ['hammer']], ['창', ['spear']], ['단검', ['dagger']],
+    ['쿼터스태프', ['quarterstaff']], ['너클', ['knuckles']],
+    ['활', ['bow']], ['석궁', ['crossbow']],
+    ['화염 스태프', ['firestaff']], ['냉기 스태프', ['froststaff']],
+    ['아케인 스태프', ['arcanestaff']], ['신성 스태프', ['holystaff']],
+    ['자연 스태프', ['naturestaff']], ['저주 스태프', ['cursestaff']],
+    ['셰이프시프터', ['shapeshifterstaff']], ['보조 장비', ['offhand']],
+  ]],
+  ['기타', [
+    ['가방', ['bag']], ['망토', ['cape']], ['음식', ['food']], ['물약', ['potion']],
+    ['채집 도구', ['tools']], ['채집 장비', ['gatherergear']],
+    ['도축', ['meat_cow','meat_sheep','meat_pig','meat_goat','meat_chicken','meat_goose']],
+  ]],
 ];
 
 /* 제작 특화 카테고리의 한글 이름 — 요약에 쓴다 */
@@ -1092,6 +1136,22 @@ const CAT_KO = {
   meat_goat:'염소고기', meat_chicken:'닭고기', meat_goose:'거위고기',
 };
 const dailyLevel = cc => (cfg.dailyCats || {})[cc] || 0;
+/** 지정된 보너스를 묶음 이름으로 요약 — 판금 세 부위를 다 적지 않는다 */
+function dailySummary(){
+  const out = [], seen = new Set();
+  for(const [, groups] of DAILY_GROUPS)
+    for(const [label, ccs] of groups){
+      const lvs = [...new Set(ccs.map(dailyLevel))];
+      if(lvs.length === 1 && lvs[0] > 0){
+        out.push(`${label} +${lvs[0]}%`);
+        ccs.forEach(c => seen.add(c));
+      }
+    }
+  // 묶음이 부분만 지정된 경우는 개별로 적는다
+  for(const cc in (cfg.dailyCats || {}))
+    if(!seen.has(cc)) out.push(`${CAT_KO[cc] || cc} +${cfg.dailyCats[cc]}%`);
+  return out.join(' · ');
+}
 const dailyCount = () => Object.keys(cfg.dailyCats || {}).length;
 
 /** 그 정제 계열을 가장 많이 쓰는 도시 순서 */
@@ -1318,23 +1378,28 @@ function cfgPanel(rec){
           `<option value="${v}" ${+cfg.quality===v?'selected':''}>${k}</option>`).join('')}</select></div>
     </div>
     ${dailyOpen ? `<div class="cfgrow" style="display:block">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
-        <b style="font-size:12px">오늘의 일일 보너스</b>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;flex-wrap:wrap">
+        <b style="font-size:12px;white-space:nowrap;flex-shrink:0">오늘의 일일 보너스</b>
         <span class="status">인게임 <b>액티비티</b> 메뉴에서 오늘 뽑힌 카테고리를 확인해 눌러주세요.
           한 번 누르면 실버(+10%), 두 번이면 골드(+20%), 세 번이면 해제됩니다.
-          게임은 <b>부위별로 따로</b> 취급합니다 — 판금이라도 갑옷·투구·신발이 각각
-          다른 카테고리이고 표준 보너스 도시도 다릅니다(브릿지워치·포트 스털링·마틀록).</span>
+          일일 보너스는 <b>판금·가죽·천</b> 처럼 재질 단위로 뜨므로 묶음 버튼 하나면 됩니다
+          (안쪽 부위 전부에 적용). 표준 도시 보너스는 부위별로 갈리는데
+          (판금 갑옷 브릿지워치 · 투구 포트 스털링 · 신발 마틀록) 그건 별개로 계산됩니다.</span>
         <button class="mini" data-dailyclear="1">전체 해제</button>
         <button class="mini" data-dailyopen="0">닫기</button>
       </div>
-      ${DAILY_GROUPS.map(([g, list]) => `
+      ${DAILY_GROUPS.map(([g, groups]) => `
         <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin:3px 0">
           <span class="mut" style="font-size:10.5px;width:40px">${g}</span>
-          ${list.map(cc => {
-            const lv = dailyLevel(cc);
-            return `<button class="mini ${lv === 10 ? 'lvS' : lv === 20 ? 'lvG' : ''}"
-              data-dailycat="${cc}">${esc(CAT_KO[cc] || cc)}${
-              lv ? ` +${lv}%` : ''}</button>`;
+          ${groups.map(([label, ccs]) => {
+            // 묶음 안의 부위가 서로 다른 등급이면 혼합으로 표시한다
+            const lvs = [...new Set(ccs.map(dailyLevel))];
+            const lv = lvs.length === 1 ? lvs[0] : -1;
+            const cls = lv === 10 ? 'lvS' : lv === 20 ? 'lvG' : lv === -1 ? 'lvM' : '';
+            return `<button class="mini ${cls}" data-dailyset="${esc(ccs.join(','))}"
+              title="${ccs.length > 1 ? esc(ccs.map(c => CAT_KO[c] || c).join(' · ')) : ''}">${
+              esc(label)}${lv > 0 ? ` +${lv}%` : lv === -1 ? ' 혼합' : ''}${
+              ccs.length > 1 ? ` <span class="mut">${ccs.length}</span>` : ''}</button>`;
           }).join('')}
         </div>`).join('')}
     </div>` : ''}
@@ -1453,8 +1518,7 @@ function renderScan(){
       <div class="en" id="scaninfo">${esc(scanInfo || '')}</div>
       ${scanHint ? `<div class="hint">${scanHint}</div>` : ''}
   ${scanTodo ? `<div class="hint" style="background:#20301f;border-color:#3a5a38;color:#c8e0c0">
-    오늘 보너스가 걸린 <b>${Object.entries(cfg.dailyCats).map(([cc, lv]) =>
-      `${esc(CAT_KO[cc] || cc)} +${lv}%`).join(' · ')}</b> 만 계산했습니다.
+    오늘 보너스가 걸린 <b>${esc(dailySummary())}</b> 만 계산했습니다.
     보너스가 반환율에 이미 더해져 있습니다.</div>` : ''}
     </div>
     <button class="btn" data-scanback="1">아이템 계산으로 돌아가기</button>
@@ -1478,7 +1542,7 @@ function renderScan(){
   ${scanRows && scanRows.length ? `<div style="display:flex;gap:6px;margin-bottom:8px;align-items:center">
     <span class="mut" style="font-size:11px">정렬</span>
     ${[['profit','이익순'],['margin','이익률순'],['focus','집중당 이익순'],
-       ['vol','거래량순'],['trend','상승세순'],['safe','안정성순']]
+       ['vol','거래량순'],['trend','상승세순'],['near','빠른 순회순'],['safe','안정성순']]
       .map(([v,k]) => `<button class="mini ${scanSort===v?'on':''}" data-sort="${v}">${k}</button>`).join('')}
   </div>` : ''}`;
 
@@ -1501,7 +1565,7 @@ function renderScan(){
       <th>아이템</th><th>품질</th><th>재료 (1개당 실소모)</th><th>재료비</th><th>수수료</th>
       <th>개당 원가</th><th>판매처</th><th>판매가</th><th>7일 평균</th><th>최근 추세</th>
       <th>개당 이익</th><th>이익률</th>${cfg.focus ? '<th>집중당</th>' : ''}
-      <th>일 거래량</th><th>권장 수량</th><th>28일 피크가</th>
+      <th>경유</th><th>일 거래량</th><th>권장 수량</th><th>28일 피크가</th>
     </tr></thead>
     <tbody>
     ${scanSorted().map(x => {
@@ -1540,6 +1604,10 @@ function renderScan(){
         <td class="up">${pct(x.margin)}</td>
         ${cfg.focus ? `<td class="${isFinite(x.perFocus) ? 'up' : 'mut'}">${
             isFinite(x.perFocus) ? fmt1(x.perFocus) : '—'}</td>` : ''}
+        <td class="${(x.cities || []).length <= 2 ? 'up' : 'mut'}">${
+          fmt((x.cities || []).length)}곳
+          <div class="mut" style="font-size:10px">${
+            (x.cities || []).map(c => esc(CITY_KO[c] || c)).join(' → ')}</div></td>
         <td class="${thin ? 'stale' : 'mut'}">${h && isFinite(h.vol) ? fmt(h.vol) : '—'}</td>
         ${(() => {
           const q = suggestQty(h), pk = suggestPrice(h);
@@ -1581,6 +1649,10 @@ function renderScan(){
     <b>28일 피크가</b>는 최근 4주 중 가장 높게 체결된 날의 가격입니다(거래가 한두 건뿐인 날은 제외).
     급하게 구매 주문에 넘기는 대신 이 부근에 판매 주문을 걸어두면, 주말 프라임타임처럼
     수요가 몰릴 때 한 번에 쓸려갑니다. 옆에 그 가격으로 팔았을 때의 이익률을 같이 적었습니다.<br>
+    <b>경유</b>는 재료 구매·정제·제작·판매를 합쳐 들러야 하는 도시 수입니다. 2곳 이하는
+    초록으로 표시했습니다 — 한 도시에서 사서 만들고 바로 팔면 1곳이라 가장 빠릅니다.
+    <b>빠른 순회순</b>으로 정렬하면 이동이 적은 것부터 보여줍니다. 이익이 조금 낮아도
+    한 바퀴가 짧으면 시간당 수익은 더 나올 수 있습니다.<br>
     <b>안정성순</b>은 거래량이 있으면서 평균에서 덜 벗어난 것부터 보여줍니다.
     <b>집중당 이익순</b>은 집중을 쓸 때만 나오며, 하루 10,000 집중을 어디에
     쓸지 고르는 기준입니다 — 이익률이 높아도 집중을 많이 먹으면 손해입니다.<br>
@@ -2229,13 +2301,13 @@ document.addEventListener('click', e => {
     scanOpen || circuitOpen ? (circuitOpen ? renderCircuit() : renderScan()) : render();
     return;
   }
-  if(b.dataset.dailycat !== undefined){
-    const cc = b.dataset.dailycat;
-    const cur = dailyLevel(cc);
+  if(b.dataset.dailyset !== undefined){
+    const ccs = b.dataset.dailyset.split(',');
+    const lvs = [...new Set(ccs.map(dailyLevel))];
+    const cur = lvs.length === 1 ? lvs[0] : 0;   // 혼합이면 실버부터 다시
+    const next = cur === 0 ? 10 : cur === 10 ? 20 : 0;
     cfg.dailyCats = { ...(cfg.dailyCats || {}) };
-    if(cur === 0) cfg.dailyCats[cc] = 10;
-    else if(cur === 10) cfg.dailyCats[cc] = 20;
-    else delete cfg.dailyCats[cc];
+    for(const cc of ccs){ if(next) cfg.dailyCats[cc] = next; else delete cfg.dailyCats[cc]; }
     saveCfg();
     scanOpen || circuitOpen ? (circuitOpen ? renderCircuit() : renderScan()) : render();
     return;

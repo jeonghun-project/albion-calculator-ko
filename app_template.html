@@ -900,7 +900,7 @@ let todoMode = false;
 async function runTodo(){
   if(!dailyCount()){
     dailyOpen = true;
-    scanOpen = false; circuitOpen = false;
+    scanOpen = false; circuitOpen = false; ledgerOpen = false;
     render();
     setStatus('오늘 일일 보너스가 걸린 카테고리를 먼저 골라주세요');
     return;
@@ -1267,6 +1267,87 @@ async function runCircuit(){
   circuitBusy = false;
   setStatus(circuitInfo);
   renderCircuit();
+}
+
+/* ══ 장부 ═══════════════════════════════════════════════════════
+   계산기의 추정 이익이 아니라, 실제로 만들고 실제로 판 것을 적어 손익을 낸다.
+   제작은 그 시점의 개당 원가를 스냅샷으로 박아 둔다 — 시세가 나중에 변해도
+   이미 쓴 돈은 변하지 않기 때문이다. 판매도 그때 적용된 세율을 함께 남긴다.
+   판매는 아이템 단위 선입선출로 제작분을 소진한다.                   */
+const LEDGER = JSON.parse(localStorage.getItem('ao_ledger') || '{"crafts":[],"sales":[]}');
+LEDGER.crafts = LEDGER.crafts || []; LEDGER.sales = LEDGER.sales || [];
+const saveLedger = () => localStorage.setItem('ao_ledger', JSON.stringify(LEDGER));
+let ledgerOpen = false, ledgerMsg = '';
+
+const lgId   = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const dayOf  = ts => new Date(ts).toLocaleDateString('sv-SE');   // YYYY-MM-DD (로컬)
+const today  = () => dayOf(Date.now());
+
+function addCraft(item, qty, unit, memo){
+  LEDGER.crafts.push({ k: lgId(), item, qty: +qty, unit: +unit, ts: Date.now(), memo: memo || '' });
+  saveLedger();
+}
+function addSale(item, qty, price, mode, premium, memo){
+  const rate = (premium ? 0.04 : 0.08) + (mode === 'order' ? 0.025 : 0);
+  LEDGER.sales.push({ k: lgId(), item, qty: +qty, price: +price, rate,
+                      mode, ts: Date.now(), memo: memo || '' });
+  saveLedger();
+}
+const saleNet = s => s.price * s.qty * (1 - s.rate);
+
+/** 아이템별 선입선출 정산 — 판매마다 소진한 제작분의 원가를 붙인다 */
+function ledgerBook(){
+  const byItem = {};
+  const touch = it => (byItem[it] = byItem[it] ||
+    { item: it, made: 0, sold: 0, costMade: 0, costSold: 0, net: 0, left: 0, leftCost: 0 });
+
+  const lots = {};   // item -> [{qty 남은수량, unit}]
+  for(const c of [...LEDGER.crafts].sort((a, b) => a.ts - b.ts)){
+    const b = touch(c.item);
+    b.made += c.qty; b.costMade += c.qty * c.unit;
+    (lots[c.item] = lots[c.item] || []).push({ qty: c.qty, unit: c.unit });
+  }
+  const saleCost = {};   // 판매 k -> 소진 원가 (없으면 재고 부족)
+  const shortage = [];
+  for(const sale of [...LEDGER.sales].sort((a, b) => a.ts - b.ts)){
+    const b = touch(sale.item);
+    let need = sale.qty, cost = 0;
+    const q = lots[sale.item] || [];
+    while(need > 0 && q.length){
+      const lot = q[0];
+      const take = Math.min(need, lot.qty);
+      cost += take * lot.unit; lot.qty -= take; need -= take;
+      if(lot.qty <= 0) q.shift();
+    }
+    if(need > 0) shortage.push({ item: sale.item, qty: need });
+    saleCost[sale.k] = cost;
+    b.sold += sale.qty; b.costSold += cost; b.net += saleNet(sale);
+  }
+  for(const it in byItem){
+    const q = lots[it] || [];
+    byItem[it].left     = q.reduce((a, l) => a + l.qty, 0);
+    byItem[it].leftCost = q.reduce((a, l) => a + l.qty * l.unit, 0);
+  }
+  const rows = Object.values(byItem).sort((a, b) => (b.net - b.costSold) - (a.net - a.costSold));
+  return {
+    rows, saleCost, shortage,
+    realized: rows.reduce((a, r) => a + r.net - r.costSold, 0),
+    stock:    rows.reduce((a, r) => a + r.leftCost, 0),
+    spent:    rows.reduce((a, r) => a + r.costMade, 0),
+    got:      rows.reduce((a, r) => a + r.net, 0),
+  };
+}
+/** 하루치 요약 */
+function ledgerDay(d, saleCost){
+  const made = LEDGER.crafts.filter(c => dayOf(c.ts) === d);
+  const sold = LEDGER.sales .filter(s => dayOf(s.ts) === d);
+  return {
+    madeQty: made.reduce((a, c) => a + c.qty, 0),
+    madeCost: made.reduce((a, c) => a + c.qty * c.unit, 0),
+    soldQty: sold.reduce((a, s) => a + s.qty, 0),
+    soldNet: sold.reduce((a, s) => a + saleNet(s), 0),
+    soldCost: sold.reduce((a, s) => a + (saleCost[s.k] || 0), 0),
+  };
 }
 
 /* ══ 사이드바 ═══════════════════════════════════════════════════ */
@@ -1668,6 +1749,151 @@ function renderScan(){
 }
 
 /* ══ 정제 순회 화면 ═════════════════════════════════════════════ */
+function renderLedger(){
+  const main = document.getElementById('main');
+  const bk = ledgerBook();
+  const d  = ledgerDay(today(), bk.saleCost);
+  const cls = v => v > 0 ? 'up' : v < 0 ? 'dn' : '';
+  const stockItems = bk.rows.filter(r => r.left > 0);
+
+  const head = `
+  <div class="head" style="gap:10px">
+    <div style="flex:1;min-width:0">
+      <h2 style="font-size:16px">장부</h2>
+      <div class="en">실제로 만들고 판 것만 적어 손익을 냅니다 — 판매는 선입선출로 제작분을 소진합니다</div>
+    </div>
+    <button class="btn" data-ledgerback="1">아이템 계산으로</button>
+  </div>
+  ${ledgerMsg ? `<div class="err" style="background:#22301f;border-color:#3c5a38;color:#a9d6a0">${
+    esc(ledgerMsg)}</div>` : ''}
+  ${bk.shortage.length ? `<div class="err">재고보다 많이 판 기록이 있습니다 —
+    ${esc(bk.shortage.map(x => `${nameOf(x.item)} ${fmtQ(x.qty)}개`).join(', '))}.
+    그만큼은 원가 0 으로 잡히니 제작 기록을 추가해 주세요.</div>` : ''}
+
+  <div class="cards">
+    <div class="card"><div class="k">실현 순이익</div>
+      <div class="v ${cls(bk.realized)}">${fmt(bk.realized)}</div>
+      <div class="n">판 것의 세후 수령 − 그 물량 원가</div></div>
+    <div class="card"><div class="k">재고 평가 (원가)</div>
+      <div class="v">${fmt(bk.stock)}</div>
+      <div class="n">아직 안 판 ${fmtQ(stockItems.reduce((a,r)=>a+r.left,0))}개</div></div>
+    <div class="card"><div class="k">누적 제작 원가</div>
+      <div class="v">${fmt(bk.spent)}</div>
+      <div class="n">${fmt(LEDGER.crafts.length)}건</div></div>
+    <div class="card"><div class="k">누적 판매 수령 (세후)</div>
+      <div class="v">${fmt(bk.got)}</div>
+      <div class="n">${fmt(LEDGER.sales.length)}건</div></div>
+    <div class="card big"><div class="k">오늘 (${today()})</div>
+      <div class="v ${cls(d.soldNet - d.soldCost)}">${fmt(d.soldNet - d.soldCost)}</div>
+      <div class="n">제작 ${fmtQ(d.madeQty)}개 원가 ${fmt(d.madeCost)} ·
+        판매 ${fmtQ(d.soldQty)}개 수령 ${fmt(d.soldNet)}</div></div>
+  </div>`;
+
+  const sellForm = `
+  <div class="sec">판매 기록하기</div>
+  <div class="cfg" style="padding:10px 12px">
+    ${stockItems.length ? `
+    <div class="cfgrid">
+      <div class="field"><label>아이템 (재고)</label>
+        <select id="lgItem">${stockItems.map(r =>
+          `<option value="${esc(r.item)}">${esc(nameOf(r.item))} — ${fmtQ(r.left)}개 보유</option>`).join('')}</select></div>
+      <div class="field"><label>수량</label>
+        <input type="number" id="lgQty" min="1" step="1" value="1"></div>
+      <div class="field"><label>개당 판매 등록가</label>
+        <input type="number" id="lgPrice" min="0" step="1" placeholder="실제 등록가"></div>
+      <div class="field"><label>판매 방식</label>
+        <select id="lgMode">
+          <option value="order" ${cfg.sellMode==='order'?'selected':''}>판매 주문 (등록비 2.5%)</option>
+          <option value="instant" ${cfg.sellMode==='instant'?'selected':''}>즉시 판매</option>
+        </select></div>
+      <div class="field"><label>메모</label>
+        <input type="text" id="lgMemo" placeholder="도시 등"></div>
+    </div>
+    <div style="margin-top:9px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn pri" data-lgsell="1">판매 기록</button>
+      <span class="status">세금 ${pct(salesTax())}${cfg.sellMode==='order'?' + 등록비 2.5%':''}
+        (프리미엄 ${cfg.premium?'적용':'미적용'}) 를 빼고 실수령으로 적습니다.</span>
+    </div>`
+    : `<div class="mut">먼저 제작을 기록해야 팔 수 있습니다.
+        아이템 계산 화면에서 <b>장부에 제작 기록</b> 을 누르세요.</div>`}
+  </div>
+
+  <div class="sec">제작 직접 기록 <span class="mut" style="font-weight:400;letter-spacing:0">
+    계산 화면에서 넣는 게 편하지만, 여기서도 넣을 수 있습니다</span></div>
+  <div class="cfg" style="padding:10px 12px">
+    <div class="cfgrid">
+      <div class="field"><label>아이템</label>
+        <input type="text" id="lgcItem" placeholder="아이템 ID (예: T4_PLANKS)"
+          value="${esc(sel)}"></div>
+      <div class="field"><label>수량</label>
+        <input type="number" id="lgcQty" min="1" step="1" value="1"></div>
+      <div class="field"><label>개당 원가</label>
+        <input type="number" id="lgcUnit" min="0" step="1" placeholder="실제 들어간 원가"></div>
+      <div class="field"><label>메모</label>
+        <input type="text" id="lgcMemo" placeholder=""></div>
+    </div>
+    <div style="margin-top:9px"><button class="btn" data-lgcraft="1">제작 기록</button></div>
+  </div>`;
+
+  const itemTable = bk.rows.length ? `
+  <div class="sec">아이템별 손익</div>
+  <table>
+    <thead><tr><th>아이템</th><th>제작</th><th>판매</th><th>재고</th>
+      <th>판매 수령(세후)</th><th>판 물량 원가</th><th>실현 손익</th><th>재고 원가</th></tr></thead>
+    <tbody>${bk.rows.map(r => {
+      const p = r.net - r.costSold;
+      return `<tr>
+        <td><div class="mat"><img data-icon="${esc(r.item)}" data-sz="48" alt="">
+          <div class="tw"><div class="nm">${esc(nameOf(r.item))}</div>
+          <div class="id">${esc(r.item)}</div></div></div></td>
+        <td>${fmtQ(r.made)}</td><td>${fmtQ(r.sold)}</td><td>${fmtQ(r.left)}</td>
+        <td>${fmt(r.net)}</td><td>${fmt(r.costSold)}</td>
+        <td class="${cls(p)}">${fmt(p)}</td><td>${fmt(r.leftCost)}</td>
+      </tr>`; }).join('')}</tbody>
+  </table>` : '';
+
+  const rowsOf = (list, kind) => [...list].sort((a, b) => b.ts - a.ts).map(e => {
+    const net = kind === 'sale' ? saleNet(e) : e.qty * e.unit;
+    return `<tr>
+      <td><span class="mut">${new Date(e.ts).toLocaleString('ko-KR', {month:'2-digit',
+        day:'2-digit', hour:'2-digit', minute:'2-digit'})}</span></td>
+      <td><div class="mat"><img data-icon="${esc(e.item)}" data-sz="48" alt="">
+        <div class="tw"><div class="nm">${esc(nameOf(e.item))}</div></div></div></td>
+      <td>${fmtQ(e.qty)}</td>
+      <td>${kind === 'sale' ? fmt(e.price) : fmt(e.unit)}</td>
+      <td>${fmt(net)}${kind === 'sale'
+        ? ` <span class="tag">세 ${pct(e.rate)}</span>` : ''}</td>
+      <td style="text-align:left"><span class="mut">${esc(e.memo || '')}</span></td>
+      <td style="text-align:center"><button class="mini"
+        data-lgdel="${kind}:${esc(e.k)}">삭제</button></td>
+    </tr>`; }).join('');
+
+  const lists = `
+  <div class="sec">제작 기록 ${fmt(LEDGER.crafts.length)}건</div>
+  ${LEDGER.crafts.length ? `<table><thead><tr><th>시각</th><th>아이템</th><th>수량</th>
+    <th>개당 원가</th><th>총 원가</th><th>메모</th><th></th></tr></thead>
+    <tbody>${rowsOf(LEDGER.crafts, 'craft')}</tbody></table>`
+    : '<div class="mut" style="padding:6px 2px">아직 없습니다.</div>'}
+
+  <div class="sec">판매 기록 ${fmt(LEDGER.sales.length)}건</div>
+  ${LEDGER.sales.length ? `<table><thead><tr><th>시각</th><th>아이템</th><th>수량</th>
+    <th>개당 등록가</th><th>실수령(세후)</th><th>메모</th><th></th></tr></thead>
+    <tbody>${rowsOf(LEDGER.sales, 'sale')}</tbody></table>`
+    : '<div class="mut" style="padding:6px 2px">아직 없습니다.</div>'}
+
+  <div class="sec">백업</div>
+  <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+    <button class="mini" data-lgexport="1">내보내기 (클립보드로 복사)</button>
+    <button class="mini" data-lgimport="1">가져오기 (붙여넣기)</button>
+    <button class="mini" data-lgreset="1">전체 삭제</button>
+    <span class="status">장부는 이 브라우저에만 저장됩니다. 브라우저 데이터를 지우면 같이 지워지니
+      가끔 내보내 두세요.</span>
+  </div>`;
+
+  main.innerHTML = head + sellForm + itemTable + lists;
+  hydrateIcons(main);
+}
+
 function renderCircuit(){
   const main = document.getElementById('main');
   const rec0 = IX.get(sel);
@@ -1858,6 +2084,7 @@ function journeyStops(){
 
 /* ══ 메인 ═══════════════════════════════════════════════════════ */
 function render(){
+  if(ledgerOpen) return renderLedger();
   if(circuitOpen) return renderCircuit();
   if(scanOpen) return renderScan();
   renderSidebar();
@@ -1909,6 +2136,9 @@ function renderResult(){
     ${scanRows && scanRows.length
       ? `<button class="btn" data-scanopen="1">◀ 탐색 결과 ${fmt(scanRows.length)}종</button>`
       : `<button class="btn" data-scanrun="1" title="왼쪽 목록 조건(카테고리·티어·인챈트·검색)으로 후보를 찾습니다">수익 후보 탐색</button>`}
+    <button class="btn" data-ledgeradd="1" ${isFinite(c.unit) ? '' : 'disabled'}
+      title="지금 계산된 개당 원가로 ${fmt(c.qty)}개를 장부에 적습니다">장부에 제작 기록</button>
+    <button class="btn" data-ledgeropen="1">장부</button>
   </div>
 
   ${recs.length > 1 ? (() => {
@@ -2249,14 +2479,14 @@ document.addEventListener('click', e => {
   if(pick && !b){
     sel = pick.dataset.pick; localStorage.setItem('ao_sel', sel);
     if(pick.dataset.q){ cfg.quality = +pick.dataset.q; saveCfg(); }
-    scanOpen = false; circuitOpen = false; recipePick.clear();
+    scanOpen = false; circuitOpen = false; ledgerOpen = false; recipePick.clear();
     document.getElementById('main').scrollTop = 0;
     render(); fetchPrices(); return;
   }
 
   const row = e.target.closest('.row');
   if(row){ sel = row.dataset.id; localStorage.setItem('ao_sel', sel);
-           recipePick.clear(); scanOpen = false; circuitOpen = false;
+           recipePick.clear(); scanOpen = false; circuitOpen = false; ledgerOpen = false;
            document.getElementById('main').scrollTop = 0;
            render(); fetchPrices(); return; }
   if(!b) return;
@@ -2320,6 +2550,77 @@ document.addEventListener('click', e => {
     cfg.dailyCats = {}; saveCfg();
     scanOpen || circuitOpen ? (circuitOpen ? renderCircuit() : renderScan()) : render();
     return;
+  }
+  if(b.dataset.ledgeropen !== undefined){
+    ledgerOpen = true; scanOpen = false; circuitOpen = false; ledgerMsg = '';
+    renderLedger(); return;
+  }
+  if(b.dataset.ledgerback !== undefined){
+    ledgerOpen = false; ledgerMsg = ''; render(); fetchPrices(); return;
+  }
+  if(b.dataset.ledgeradd !== undefined){
+    const c = calc();
+    if(!c || !isFinite(c.unit)) return;
+    addCraft(sel, c.qty, c.unit, `${CITY_KO[cfg.buyCity] || ''} 재료`);
+    ledgerOpen = true; ledgerMsg =
+      `${nameOf(sel)} ${fmtQ(c.qty)}개를 개당 ${fmt(c.unit)} (총 ${fmt(c.cost)}) 로 적었습니다.`;
+    renderLedger(); return;
+  }
+  if(b.dataset.lgsell !== undefined){
+    const item = document.getElementById('lgItem').value;
+    const qty  = +document.getElementById('lgQty').value;
+    const price= +document.getElementById('lgPrice').value;
+    const mode = document.getElementById('lgMode').value;
+    const memo = document.getElementById('lgMemo').value;
+    if(!item || !(qty > 0) || !(price > 0)){
+      ledgerMsg = '수량과 개당 판매가를 넣어주세요.'; renderLedger(); return;
+    }
+    addSale(item, qty, price, mode, cfg.premium, memo);
+    ledgerMsg = `${nameOf(item)} ${fmtQ(qty)}개 판매를 적었습니다.`;
+    renderLedger(); return;
+  }
+  if(b.dataset.lgcraft !== undefined){
+    const item = document.getElementById('lgcItem').value.trim();
+    const qty  = +document.getElementById('lgcQty').value;
+    const unit = +document.getElementById('lgcUnit').value;
+    const memo = document.getElementById('lgcMemo').value;
+    if(!IX.has(item)){ ledgerMsg = `모르는 아이템 ID 입니다: ${item}`; renderLedger(); return; }
+    if(!(qty > 0) || !(unit >= 0)){
+      ledgerMsg = '수량과 개당 원가를 넣어주세요.'; renderLedger(); return;
+    }
+    addCraft(item, qty, unit, memo);
+    ledgerMsg = `${nameOf(item)} ${fmtQ(qty)}개를 적었습니다.`;
+    renderLedger(); return;
+  }
+  if(b.dataset.lgdel !== undefined){
+    const [kind, k] = b.dataset.lgdel.split(':');
+    const arr = kind === 'sale' ? LEDGER.sales : LEDGER.crafts;
+    const i = arr.findIndex(e => e.k === k);
+    if(i >= 0) arr.splice(i, 1);
+    saveLedger(); ledgerMsg = '한 건 지웠습니다.'; renderLedger(); return;
+  }
+  if(b.dataset.lgexport !== undefined){
+    const txt = JSON.stringify(LEDGER);
+    navigator.clipboard?.writeText(txt).then(
+      () => { ledgerMsg = `장부 ${fmt(LEDGER.crafts.length + LEDGER.sales.length)}건을 클립보드에 복사했습니다.`; renderLedger(); },
+      () => { ledgerMsg = '복사에 실패했습니다: ' + txt.slice(0, 200); renderLedger(); });
+    return;
+  }
+  if(b.dataset.lgimport !== undefined){
+    const txt = prompt('내보낸 장부 JSON 을 붙여넣으세요. 지금 장부는 덮어씁니다.');
+    if(!txt) return;
+    try{
+      const o = JSON.parse(txt);
+      if(!Array.isArray(o.crafts) || !Array.isArray(o.sales)) throw new Error('형식이 다릅니다');
+      LEDGER.crafts = o.crafts; LEDGER.sales = o.sales; saveLedger();
+      ledgerMsg = `제작 ${fmt(o.crafts.length)}건 · 판매 ${fmt(o.sales.length)}건을 불러왔습니다.`;
+    }catch(e){ ledgerMsg = '읽지 못했습니다: ' + e.message; }
+    renderLedger(); return;
+  }
+  if(b.dataset.lgreset !== undefined){
+    if(!confirm('장부를 전부 지웁니다. 되돌릴 수 없습니다.')) return;
+    LEDGER.crafts = []; LEDGER.sales = []; saveLedger();
+    ledgerMsg = '장부를 비웠습니다.'; renderLedger(); return;
   }
   if(b.dataset.circuitrun !== undefined){ scanOpen = false; runCircuit(); return; }
   if(b.dataset.circuitback !== undefined){ circuitOpen = false; render(); fetchPrices(); return; }

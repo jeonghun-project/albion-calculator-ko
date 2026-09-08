@@ -1186,51 +1186,59 @@ async function runScan(){
    급등을 잡는 게 목적이라 현재가를 평균으로 눌러 보정하지 않는다. */
 let flipOpen = false, flipRows = null, flipInfo = '', flipSort = 'profit';
 
-function runFlip(){
+/** 아이템 하나의 '사서 팔기' — 가장 싸게 사는 곳과 가장 비싸게 파는 곳.
+   제작 화면에서도 쓰라고 따로 뽑아 뒀다. 저장된 시세만 보므로 조회가 없다. */
+function flipFor(id, q = 1){
+  const rec = IX.get(id);
+  if(!rec) return null;
   const cities = CITIES.map(c => c[0]);
+  let buy = null;
+  for(const c of cities){
+    const p = rawPriceAt(id, c, q);
+    if(!p || !p.s) continue;
+    if(!buy || p.s < buy.v) buy = { city: c, v: p.s, date: p.sd };
+  }
+  if(!buy) return null;
+  let sell = null;
+  const take = (c, mode, v, date) => {
+    if(!v) return;
+    const net = netOf(v, mode);
+    if(!sell || net > sell.net) sell = { city: c, mode, v, net, date };
+  };
+  for(const c of [...cities, BLACK_MARKET]){
+    if(c === BLACK_MARKET && !BM_SELLS(rec)) continue;
+    const p = rawPriceAt(id, c, q);
+    if(!p) continue;
+    take(c, 'instant', p.b, p.bd);
+    if(c !== buy.city) take(c, 'order', p.s, p.sd);   // 산 도시에 되걸기는 의미 없다
+  }
+  if(!sell) return null;
+  // 양쪽 다 이상 호가는 걸러낸다
+  const hs = hist7(id, sell.city, q), hb = hist7(id, buy.city, q);
+  if(hs && isFinite(hs.avg) && hs.avg > 0 && sell.v / hs.avg - 1 > ABSURD_DEV) return { absurd: true };
+  if(hb && isFinite(hb.avg) && hb.avg > 0 && buy.v < hb.avg / ABSURD_DEV) return { absurd: true };
+  const profit = sell.net - buy.v;
+  return {
+    id, rec, q, buy, sell, profit,
+    margin: buy.v > 0 ? profit / buy.v : NaN,
+    same: buy.city === sell.city,
+    dev: hs && isFinite(hs.avg) && hs.avg ? sell.v / hs.avg - 1 : null,
+    vol: hs && isFinite(hs.vol) ? hs.vol : NaN,
+    cv:  hs && isFinite(hs.cv)  ? hs.cv  : NaN,
+    trend: hs && isFinite(hs.trend) ? hs.trend : NaN,
+  };
+}
+
+function runFlip(){
   const rows = [];
   let absurd = 0, noPair = 0;
   for(const r of ITEMS){
     for(const q of QUALITIES){
-      // 사는 곳 — 판매 주문 최저가(즉시 구매)가 가장 싼 도시
-      let buy = null;
-      for(const c of cities){
-        const p = rawPriceAt(r.id, c, q);
-        if(!p || !p.s) continue;
-        if(!buy || p.s < buy.v) buy = { city: c, v: p.s, date: p.sd };
-      }
-      if(!buy){ noPair++; continue; }
-      // 파는 곳 — 세후 실수령이 가장 큰 (도시 × 방식). 암시장은 장비류만
-      let sell = null;
-      const take = (c, mode, v, date) => {
-        if(!v) return;
-        const net = netOf(v, mode);
-        if(!sell || net > sell.net) sell = { city: c, mode, v, net, date };
-      };
-      for(const c of [...cities, BLACK_MARKET]){
-        if(c === BLACK_MARKET && !BM_SELLS(r)) continue;
-        const p = rawPriceAt(r.id, c, q);
-        if(!p) continue;
-        take(c, 'instant', p.b, p.bd);
-        // 산 도시에 되걸기는 의미가 없다 (같은 주문서에 다시 올리는 셈)
-        if(c !== buy.city) take(c, 'order', p.s, p.sd);
-      }
-      if(!sell){ noPair++; continue; }
-      const profit = sell.net - buy.v;
-      if(profit <= 0) continue;
-      // 양쪽 다 이상 호가는 걸러낸다
-      const hs = hist7(r.id, sell.city, q), hb = hist7(r.id, buy.city, q);
-      if(hs && isFinite(hs.avg) && hs.avg > 0 && sell.v / hs.avg - 1 > ABSURD_DEV){ absurd++; continue; }
-      if(hb && isFinite(hb.avg) && hb.avg > 0 && buy.v < hb.avg / ABSURD_DEV){ absurd++; continue; }
-      rows.push({
-        id: r.id, rec: r, q, buy, sell, profit,
-        margin: profit / buy.v,
-        same: buy.city === sell.city,
-        dev: hs && isFinite(hs.avg) && hs.avg ? sell.v / hs.avg - 1 : null,
-        vol: hs && isFinite(hs.vol) ? hs.vol : NaN,
-        cv:  hs && isFinite(hs.cv)  ? hs.cv  : NaN,
-        trend: hs && isFinite(hs.trend) ? hs.trend : NaN,
-      });
+      const f = flipFor(r.id, q);
+      if(!f){ noPair++; continue; }
+      if(f.absurd){ absurd++; continue; }
+      if(f.profit <= 0) continue;
+      rows.push(f);
     }
   }
   const pos = rows.filter(x =>
@@ -2078,7 +2086,7 @@ function renderScan(){
       <th>아이템</th><th>품질</th><th>재료 (1개당 실소모)</th><th>재료비</th><th>수수료</th>
       <th>개당 원가</th><th>판매처</th><th>판매가</th><th>7일 평균</th><th>최근 추세</th>
       <th>개당 이익</th><th>이익률</th>${cfg.focus ? '<th>집중당</th>' : ''}
-      <th>경유</th><th>일 거래량</th><th>안정성</th><th>권장 수량</th><th>28일 피크가</th>
+      <th>사서 팔기</th><th>경유</th><th>일 거래량</th><th>안정성</th><th>권장 수량</th><th>28일 피크가</th>
     </tr></thead>
     <tbody>
     ${scanSorted().map(x => {
@@ -2121,6 +2129,15 @@ function renderScan(){
         <td class="up">${pct(x.margin)}</td>
         ${cfg.focus ? `<td class="${isFinite(x.perFocus) ? 'up' : 'mut'}">${
             isFinite(x.perFocus) ? fmt1(x.perFocus) : '—'}</td>` : ''}
+        <td>${(() => {
+          const f = flipFor(x.id, x.q || 1);
+          if(!f || f.absurd || f.profit <= 0) return '<span class="mut">—</span>';
+          const better = f.profit > x.profit;
+          return `<span class="${better ? 'up' : 'mut'}">+${fmt(f.profit)}</span>
+            <div class="mut" style="font-size:10px">${esc(CITY_KO[f.buy.city])}에서 ${
+              fmt(f.buy.v)}</div>
+            ${better ? '<div class="up" style="font-size:10px">사는 게 낫다</div>' : ''}`;
+        })()}</td>
         <td class="${(x.cities || []).length <= 2 ? 'up' : 'mut'}">${
           fmt((x.cities || []).length)}곳
           <div class="mut" style="font-size:10px">${
@@ -2183,6 +2200,9 @@ function renderScan(){
     <b>28일 피크가</b>는 최근 4주 중 가장 높게 체결된 날의 가격입니다(거래가 한두 건뿐인 날은 제외).
     급하게 구매 주문에 넘기는 대신 이 부근에 판매 주문을 걸어두면, 주말 프라임타임처럼
     수요가 몰릴 때 한 번에 쓸려갑니다. 옆에 그 가격으로 팔았을 때의 이익률을 같이 적었습니다.<br>
+    <b>사서 팔기</b>는 만들지 않고 시장에서 사서 파는 경우의 개당 이익입니다. 제작보다
+    나으면 <span class="up">사는 게 낫다</span>가 붙습니다 — 완제품이 재료보다 싸게
+    풀린 상황이라 만들 이유가 없습니다. 더 자세히 보려면 왼쪽 <b>플립핑</b>으로 가세요.<br>
     <b>경유</b>는 재료 구매·정제·제작·판매를 합쳐 들러야 하는 도시 수입니다. 2곳 이하는
     초록으로 표시했습니다 — 한 도시에서 사서 만들고 바로 팔면 1곳이라 가장 빠릅니다.
     <b>빠른 순회순</b>으로 정렬하면 이동이 적은 것부터 보여줍니다. 이익이 조금 낮아도
@@ -2799,6 +2819,21 @@ function renderResult(){
     <div class="card"><div class="k">집중 1당 이익</div>
       <div class="v ${profitCls}">${cfg.focus && !noSell ? fmt1(c.perFocus) : '—'}</div>
       <div class="n">${cfg.focus ? `총 ${fmt(c.focusTotal)} 집중` : '집중 미사용'}</div></div>
+    ${(() => {
+      const f = flipFor(sel, +cfg.quality);
+      if(!f || f.absurd) return '';
+      const better = f.profit > c.profit / c.qty;
+      return `<div class="card"><div class="k">사서 팔기 (플립)</div>
+        <div class="v ${f.profit > 0 ? (better ? 'up' : '') : 'dn'}">${fmt(f.profit)}</div>
+        <div class="n">${esc(CITY_KO[f.buy.city])} ${fmt(f.buy.v)} → ${
+          esc(CITY_KO[f.sell.city])} ${fmt(f.sell.v)}${f.same ? ' (같은 도시)' : ''}</div></div>
+      <div class="card"><div class="k">어느 쪽이 나은가</div>
+        <div class="v ${better ? 'dn' : 'up'}" style="font-size:14px">${
+          better ? '사서 파는 쪽' : '만들어 파는 쪽'}</div>
+        <div class="n">${better
+          ? `제작 ${fmt(c.profit / c.qty)} < 플립 ${fmt(f.profit)} — 만들 필요 없습니다`
+          : `제작 ${fmt(c.profit / c.qty)} ≥ 플립 ${fmt(f.profit)}`}</div></div>`;
+    })()}
     <div class="card"><div class="k">제작 명성 (추정)</div>
       <div class="v">${fmt(c.fameTotal)}</div>
       <div class="n">${cfg.qty}개 기준</div></div>

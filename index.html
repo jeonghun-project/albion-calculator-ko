@@ -209,6 +209,8 @@ td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
       <button class="btn" data-scanrun="1">이 조건으로 수익 후보 탐색</button>
       <button class="btn" data-circuitrun="1">도시별 정제 순회</button>
       <button class="btn pri" data-todorun="1">오늘 할 일</button>
+      <div id="storebox" style="border-top:1px solid var(--line);padding-top:7px;margin-top:2px">${
+        storePanel()}</div>
     </div>
     <div class="list" id="list"></div>
   </aside>
@@ -640,6 +642,100 @@ function calc(){
   };
 }
 
+/* ══ 저장소 (IndexedDB) ════════════════════════════════════════
+   시세와 추이를 브라우저에 눌러 담아, 다음에 열 때 네트워크 없이 바로 쓴다.
+   계산 엔진이 전부 동기 호출이라 IndexedDB 를 직접 읽을 수는 없다. 그래서
+   시작할 때 통째로 메모리 Map 으로 올리고, IndexedDB 는 저장 전용으로 둔다.
+   실측: http 환경에서도 동작하고 120MB 까지 밀어넣어도 막히지 않았다.
+   다만 http 는 navigator.storage 가 없어 영구 저장을 요청할 수 없으므로
+   브라우저가 지울 수 있다 — 지워지면 다시 수집하면 된다. */
+const DB_NAME = 'ao_calc', DB_VER = 1;
+let _db = null, dbReady = false, dbNote = '', dbPersisted = null, dbQuotaNote = '';
+
+function dbOpen(){
+  if(_db) return Promise.resolve(_db);
+  return new Promise((res, rej) => {
+    let rq;
+    try{ rq = indexedDB.open(DB_NAME, DB_VER); }
+    catch(e){ return rej(e); }
+    rq.onupgradeneeded = () => {
+      const db = rq.result;
+      for(const n of ['prices', 'hist'])
+        if(!db.objectStoreNames.contains(n)) db.createObjectStore(n);
+    };
+    rq.onsuccess = () => { _db = rq.result; res(_db); };
+    rq.onerror   = () => rej(rq.error);
+  });
+}
+const dbAll = store => new Promise((res, rej) => {
+  const tx = _db.transaction(store), os = tx.objectStore(store);
+  const keys = [], vals = [];
+  const kq = os.getAllKeys(), vq = os.getAll();
+  kq.onsuccess = () => keys.push(...kq.result);
+  vq.onsuccess = () => vals.push(...vq.result);
+  tx.oncomplete = () => res(keys.map((k, i) => [k, vals[i]]));
+  tx.onerror    = () => rej(tx.error);
+});
+function dbPut(store, entries){
+  if(!dbReady || !entries.length) return;
+  try{
+    const tx = _db.transaction(store, 'readwrite'), os = tx.objectStore(store);
+    for(const [k, v] of entries) os.put(v, k);
+  }catch(e){ /* 저장 실패는 계산에 영향 없다 */ }
+}
+function dbClear(){
+  if(!dbReady) return;
+  try{
+    const tx = _db.transaction(['prices', 'hist'], 'readwrite');
+    tx.objectStore('prices').clear(); tx.objectStore('hist').clear();
+  }catch(e){}
+}
+
+/** 브라우저가 저장분을 지우지 않도록 영구 저장을 요청한다.
+   navigator.storage 는 보안 컨텍스트(https) 전용이라 http 에서는 없다. */
+async function dbPersist(){
+  if(!navigator.storage || !navigator.storage.persist) return null;
+  try{
+    if(await navigator.storage.persisted()) return true;
+    return await navigator.storage.persist();
+  }catch(e){ return null; }
+}
+/** 남은 용량 — 역시 https 에서만 조회된다 */
+async function dbQuota(){
+  if(!navigator.storage || !navigator.storage.estimate) return null;
+  try{ return await navigator.storage.estimate(); }catch(e){ return null; }
+}
+
+/** 저장해 둔 것을 메모리로 올린다. 서버가 다른 항목은 건너뛴다. */
+async function dbLoad(){
+  try{
+    await dbOpen();
+    dbReady = true;
+    const pre = cfg.server + '|';
+    let np = 0, nh = 0;
+    for(const [k, v] of await dbAll('prices')){
+      if(!k.startsWith(pre) || !v) continue;
+      const key = k.slice(pre.length);
+      prices.set(key, v);
+      if(v.t) priceAt.set(key, v.t);
+      np++;
+    }
+    for(const [k, v] of await dbAll('hist')){
+      if(!k.startsWith(pre) || !v) continue;
+      hist.set(k.slice(pre.length), v);
+      nh++;
+    }
+    dbNote = np || nh ? `저장된 시세 ${fmt(np)}행 · 추이 ${fmt(nh)}행` : '저장된 시세 없음';
+    // 영구 저장을 요청해 두면 브라우저가 용량 압박에도 안 지운다
+    dbPersisted = await dbPersist();
+    const q = await dbQuota();
+    if(q && q.quota) dbQuotaNote = `여유 ${fmt((q.quota - q.usage) / 1024 / 1024)} MB`;
+  }catch(e){
+    dbReady = false;
+    dbNote = 'IndexedDB 사용 불가 — 이번 세션만 메모리에 담습니다';
+  }
+}
+
 /* ══ 시세 조회 ══════════════════════════════════════════════════ */
 function neededIds(){
   const s = new Set([sel]);
@@ -686,14 +782,22 @@ async function loadPrices(ids, cities, qualities, onProgress, force){
   for(const chunk of batches){
     const res = await fetch(base + chunk.join(',') + qs);
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const save = [];
+    const now2 = Date.now();
     for(const p of await res.json()){
-      prices.set(pkey(p.item_id, p.city, p.quality), {
+      const key = pkey(p.item_id, p.city, p.quality);
+      const val = {
         s: p.sell_price_min, b: p.buy_price_max,
         sd: p.sell_price_min_date.startsWith('0001') ? null : p.sell_price_min_date,
         bd: p.buy_price_max_date .startsWith('0001') ? null : p.buy_price_max_date,
-      });
+        t: now2,
+      };
+      prices.set(key, val);
+      // 값이 아예 없는 행은 저장하지 않는다 — 8.6% 만 값이 있어서 용량이 크게 줄어든다
+      if(val.s || val.b) save.push([cfg.server + '|' + key, val]);
       got++;
     }
+    dbPut('prices', save);
     // 응답이 없던 조합도 받아온 것으로 기록해 재요청을 막는다
     const t = Date.now();
     for(const enc of chunk){
@@ -738,6 +842,7 @@ async function fetchHistory(ids, cities, qualities){
       const chunk = part.join(',');
       const res = await fetch(base + chunk + qs);
       if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      const hsave = [];
       for(const e of await res.json()){
         const all  = e.data || [];
         const rows = all.slice(-7);
@@ -757,7 +862,8 @@ async function fetchHistory(ids, cities, qualities){
         const solid = all.filter(r => r.item_count >= Math.max(1, med * 0.2));
         let peak = null;
         for(const r of solid) if(!peak || r.avg_price > peak.avg_price) peak = r;
-        hist.set(pkey(e.item_id, e.location, e.quality), {
+        const hkey = pkey(e.item_id, e.location, e.quality);
+        hist.set(hkey, {
           avg: w ? w.avg : NaN,
           vol: rows.length ? (w ? w.cnt : 0) / rows.length : NaN,
           days: rows.length,
@@ -778,8 +884,11 @@ async function fetchHistory(ids, cities, qualities){
           peakDate: peak ? peak.timestamp : null,
           medVol: med,
           span: all.length,
+          t: Date.now(),
         });
+        if(w) hsave.push([cfg.server + '|' + hkey, hist.get(hkey)]);
       }
+      dbPut('hist', hsave);
     }
   }catch(e){ /* 추이는 보조 정보 — 실패해도 계산은 그대로 */ }
   // 응답이 없던 조합은 빈 값으로 채워 재요청을 막는다
@@ -844,6 +953,9 @@ let dailyOpen = false, scanTodo = false;
 /* 추이를 받아볼 후보 수. 임계값을 쓰면 이익 나는 것 전부를 봐야
    '안정적이지만 이익이 중간' 인 것이 걸러지지 않는다. */
 const SCAN_HEAD = 200, SCAN_HEAD_MAX = 1200, SCAN_CAP = 200;
+/* 7일 평균 대비 이 배수를 넘는 호가는 시장가로 보지 않는다.
+   전체를 훑으면 '석회암 석괴 1억' 같은 장난 주문이 상위를 덮어버린다. */
+const ABSURD_DEV = 10;
 let scanBusy = false, scanRows = null, scanInfo = '', scanHint = '';
 /* 탐색 결과는 아이템 상세로 넘어가도 버리지 않고, scanOpen 으로 화면만 오간다 */
 let scanOpen = false;
@@ -882,6 +994,8 @@ function scanSorted(){
       if(!g) return -Infinity;
       const d = dev(x), v = vol(x);
       if(d === null || v <= 0) return -Infinity;
+      // 현재가가 평균에서 100% 넘게 벗어났으면 안정적이라 볼 수 없다
+      if(Math.abs(d) > 1) return -Infinity;
       let sc = 0;
       sc += Math.min(v, 500) / 500 * 30;                                  // 거래량
       if(isFinite(g.cv))          sc += Math.max(0, 1 - g.cv / 0.3) * 30;  // 가격 안정
@@ -1023,8 +1137,13 @@ async function runScan(){
       for(const [c, v] of byCity)
         await fetchHistory([...v.ids], [c], [...v.qs]);
     }
-    let cut = 0;
+    let cut = 0, absurd = 0;
     const kept = head.filter(x => {
+      // 7일 평균의 10배를 넘는 호가는 장난 주문이나 오타다 — 기회가 아니라 잘못된 데이터
+      const hh = hist7(x.id, x.sp.city || cfg.sellCity, x.q || 1);
+      if(hh && isFinite(hh.avg) && hh.avg > 0 && x.sell / hh.avg - 1 > ABSURD_DEV){
+        absurd++; return false;
+      }
       const h = hist7(x.id, x.sp.city || cfg.sellCity, x.q || 1);
       if(cfg.minVol > 0 && (!h || !isFinite(h.vol) || h.vol < cfg.minVol)){ cut++; return false; }
       if(cfg.maxDev > 0){
@@ -1039,6 +1158,7 @@ async function runScan(){
     scanInfo = `후보 ${fmt(cands.length)}종 → ${fmt(shown)}종 ${fmt(win.length)}행` +
                ` · 이익 ${fmt(pos.length)}행 중 ${fmt(head.length)}행 검토` +
                ` · 적자 ${fmt(rows.length - pos.length)}행` +
+               (absurd ? ` · 이상 호가 ${fmt(absurd)}행 제외` : '') +
                (cut ? ` · 임계값 미달 ${fmt(cut)}행` : '') +
                ` · 시세 없음 ${fmt(noSell)}종 제외` +
                (kept.length > SCAN_CAP ? ` · 상위 ${fmt(SCAN_CAP)}행만 표시` : '');
@@ -1469,6 +1589,106 @@ function ledgerDay(d, saleCost){
   };
 }
 
+/* ══ 전체 수집 ══════════════════════════════════════════════════
+   제작 가능 9,008종을 전 도시·전 품질로 훑어 저장소에 담는다.
+   실측: 시세 31요청 51초, 추이 61요청 2분. 스로틀 한도가 분당 60요청이라
+   요청 사이에 간격을 두고 천천히 돈다. 중단·재개가 되고, 이미 신선한 항목은
+   건너뛴다. 한 번 채워두면 탐색이 네트워크 없이 즉시 끝난다. */
+let fullBusy = false, fullStop = false, fullNote = '', fullPct = 0;
+const FULL_GAP_MS = 1100;      // 요청 간격 — 분당 55건 정도로 여유를 둔다
+const FULL_FRESH_MS = 6 * 60 * 60 * 1000;   // 6시간 안에 받은 건 다시 안 받는다
+
+async function runFullScan(withHistory){
+  if(fullBusy){ fullStop = true; return; }
+  fullBusy = true; fullStop = false; fullPct = 0;
+  const ids = ITEMS.filter(r => r.r).map(r => r.id);
+  const cities = PRICE_CITIES;
+  const now = Date.now();
+  const stale = k => { const t = priceAt.get(k); return !t || now - t > FULL_FRESH_MS; };
+  const want = ids.filter(id => cities.some(c => [1,2,3,4,5].some(q => stale(pkey(id, c, q)))));
+
+  const base = `https://${cfg.server}.albion-online-data.com/api/v2/stats/prices/`;
+  const qs   = `?locations=${cities.map(encodeURIComponent).join(',')}&qualities=1,2,3,4,5`;
+  const bs   = priceBatches(want, base, qs);
+  fullNote = `시세 ${fmt(want.length)}종 · ${fmt(bs.length)}요청 예정`;
+  renderStore();
+
+  let done = 0, err = 0;
+  for(const chunk of bs){
+    if(fullStop){ fullNote = `중단 — 시세 ${fmt(done)}/${fmt(want.length)}종까지 담았습니다`; break; }
+    try{
+      await loadPrices(chunk.map(decodeURIComponent), cities, [1,2,3,4,5], null, true);
+    }catch(e){ err++; }
+    done += chunk.length;
+    fullPct = done / Math.max(1, want.length) * (withHistory ? 45 : 100);
+    fullNote = `시세 ${fmt(done)}/${fmt(want.length)}종` + (err ? ` · 실패 ${err}건` : '');
+    renderStore();
+    await new Promise(r => setTimeout(r, FULL_GAP_MS));
+  }
+
+  if(withHistory && !fullStop){
+    // 추이는 값이 있는 아이템만 — 거래가 아예 없는 것은 받아도 빈 응답이다
+    const live = ids.filter(id => cities.some(c => {
+      const p = rawPrice(id, c, 1); return p && (p.s || p.b);
+    }));
+    const hb = `https://${cfg.server}.albion-online-data.com/api/v2/stats/history/`;
+    const hq = `?locations=${cities.map(encodeURIComponent).join(',')}&qualities=1&time-scale=24`;
+    const hbs = priceBatches(live, hb, hq);
+    let hd = 0;
+    for(const chunk of hbs){
+      if(fullStop){ fullNote = `중단 — 추이 ${fmt(hd)}/${fmt(live.length)}종까지 담았습니다`; break; }
+      try{ await fetchHistory(chunk.map(decodeURIComponent), cities, [1]); }catch(e){ err++; }
+      hd += chunk.length;
+      fullPct = 45 + hd / Math.max(1, live.length) * 55;
+      fullNote = `추이 ${fmt(hd)}/${fmt(live.length)}종` + (err ? ` · 실패 ${err}건` : '');
+      renderStore();
+      await new Promise(r => setTimeout(r, FULL_GAP_MS));
+    }
+  }
+
+  if(!fullStop){ fullPct = 100; fullNote = `완료 — 시세 ${fmt(prices.size)}행 · 추이 ${fmt(hist.size)}행`; }
+  fullBusy = false;
+  dbNote = `저장된 시세 ${fmt(prices.size)}행 · 추이 ${fmt(hist.size)}행`;
+  renderStore();
+}
+
+/** 저장소 패널만 다시 그린다 (진행률 갱신용) */
+function renderStore(){
+  const el = document.getElementById('storebox');
+  if(!el) return;
+  el.innerHTML = storePanel();
+}
+function storePanel(){
+  // Math.max(...배열) 은 항목이 수만 개면 스택을 넘긴다 — 순회로 구한다
+  let newest = 0;
+  for(const t of priceAt.values()) if(t > newest) newest = t;
+  return `
+    <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
+      <b style="font-size:11.5px;white-space:nowrap">저장소</b>
+      <span class="status">${esc(dbNote || '준비 중')}${
+        newest ? ` · 최근 수집 ${esc(ago(new Date(newest).toISOString().slice(0,19)) || '방금')}` : ''}${
+        dbQuotaNote ? ` · ${esc(dbQuotaNote)}` : ''}</span>
+      ${!dbReady ? ''
+        : dbPersisted === true
+        ? `<span class="tag" title="브라우저가 저장분을 지우지 않습니다">영구</span>`
+        : dbPersisted === false
+        ? `<span class="tag stale" title="영구 저장을 요청했지만 브라우저가 아직 거절했습니다. 북마크하거나 자주 방문하면 대개 승격됩니다. 그때까지는 용량 압박 시 지워질 수 있습니다">임시</span>`
+        : `<span class="tag stale" title="https 가 아니어서 영구 저장을 요청할 수 없습니다">임시</span>`}
+    </div>
+    ${fullBusy ? `<div style="margin-top:6px">
+      <div style="height:6px;background:var(--panel2);border-radius:3px;overflow:hidden">
+        <div style="height:100%;width:${fullPct.toFixed(1)}%;background:var(--acc)"></div></div>
+      <div class="status" style="margin-top:4px">${esc(fullNote)}</div>
+    </div>` : fullNote ? `<div class="status" style="margin-top:5px">${esc(fullNote)}</div>` : ''}
+    <div style="display:flex;gap:5px;margin-top:6px;flex-wrap:wrap">
+      ${fullBusy
+        ? `<button class="mini" data-fullstop="1">중단</button>`
+        : `<button class="mini" data-full="1">전체 수집 (시세만)</button>
+           <button class="mini" data-full="2">전체 수집 (시세+추이)</button>`}
+      ${!fullBusy && prices.size ? `<button class="mini" data-fullclear="1">저장소 비우기</button>` : ''}
+    </div>`;
+}
+
 /* ══ 사이드바 ═══════════════════════════════════════════════════ */
 /* 계열 이름으로도 찾을 수 있게 하는 한글 별칭.
    게임 한글 이름에는 계열 이름이 들어가지 않는다 — 셰이프시프터 계열의 한글 이름은
@@ -1798,7 +2018,9 @@ function renderScan(){
               esc(CITY_KO[x.sp.city] || '—')}</span>
           <div class="mut" style="font-size:10px">${
               x.sp.mode === 'order' ? '판매 주문' : '즉시 판매'}</div></td>
-        <td>${fmt(x.sell)}${x.sp.date && staleH(x.sp.date) > 24
+        <td>${fmt(x.sell)}${spike && dev > 1
+              ? `<div class="stale" style="font-size:10px">이상 호가</div>` : ''}${
+              x.sp.date && staleH(x.sp.date) > 24
               ? `<div class="mut" style="font-size:10px">${ago(x.sp.date)}</div>` : ''}</td>
         <td>${dev === null ? '<span class="stale">기록 없음</span>'
               : `${fmt(h.avg)}<div class="${spike ? 'stale' : 'mut'}" style="font-size:10px">${
@@ -1847,6 +2069,9 @@ function renderScan(){
     ${cfg.station === 'bonus' ? '보너스 도시' : cfg.station === 'island' ? '섬'
       : cfg.station === 'hideout' ? '은신처' : '일반 도시'}${cfg.focus ? ' · 집중 사용' : ''})
     기준입니다. 행을 누르면 그 아이템의 상세 계산으로 넘어갑니다.<br>
+    7일 평균의 <b>10배</b>를 넘는 호가는 아예 제외합니다 — 실제로 석회암 석괴(7일 평균 62)에
+    1억 짜리 주문이 걸려 있는 식이라, 안 걸러내면 전체 탐색 상위가 장난 주문으로 덮입니다.
+    <b>안정성순</b>은 평균에서 100% 넘게 벗어난 것도 제외합니다.<br>
     <b>7일 평균 대비</b>가 크게 벌어져 있으면 지금 값이 튄 주문일 가능성이 높습니다.
     이익률이 아무리 높아도 그 주문 하나가 사라지면 그만입니다.
     <b>일 거래량</b>이 낮으면(20 미만, 색으로 표시) 만들어도 안 팔립니다.
@@ -2856,6 +3081,12 @@ document.addEventListener('click', e => {
     cfg.chainDepth = b.dataset.chain === 'best' ? 'best' : +b.dataset.chain;
     saveCfg(); runCircuit(); return;
   }
+  if(b.dataset.full !== undefined){ runFullScan(b.dataset.full === '2'); return; }
+  if(b.dataset.fullstop !== undefined){ fullStop = true; fullNote = '중단 요청…'; renderStore(); return; }
+  if(b.dataset.fullclear !== undefined){
+    prices.clear(); priceAt.clear(); hist.clear(); dbClear();
+    fullNote = ''; dbNote = '저장된 시세 없음'; renderStore(); return;
+  }
   if(b.dataset.todorun !== undefined){ circuitOpen = false; runTodo(); return; }
   if(b.dataset.scanrun !== undefined){ circuitOpen = false; runScan(); return; }
   if(b.dataset.scanback !== undefined){   // 탐색 화면 → 아이템 계산
@@ -2920,7 +3151,12 @@ document.addEventListener('keydown', e => {
 
 document.getElementById('server').value = cfg.server;
 render();
-fetchPrices();
+(async () => {
+  await dbLoad();          // 저장해 둔 시세를 메모리로 올린 뒤에 화면을 채운다
+  renderStore();
+  render();
+  fetchPrices();
+})();
 </script>
 </body>
 </html>

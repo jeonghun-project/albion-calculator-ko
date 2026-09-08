@@ -209,6 +209,7 @@ td input[type=number]{width:88px;padding:2px 5px;font-size:11.5px}
       <button class="btn" data-scanrun="1">이 조건으로 수익 후보 탐색</button>
       <button class="btn" data-circuitrun="1">도시별 정제 순회</button>
       <button class="btn pri" data-todorun="1">오늘 할 일</button>
+      <button class="btn" data-fliprun="1">플립핑 (사서 팔기)</button>
       <div id="storebox" style="border-top:1px solid var(--line);padding-top:7px;margin-top:2px">${
         storePanel()}</div>
     </div>
@@ -1178,6 +1179,94 @@ async function runScan(){
   renderScan();
 }
 
+/* ══ 플립핑 ═════════════════════════════════════════════════════
+   만들지 않고 싸게 사서 비싸게 파는 것만 찾는다. 제작이 없으니 사용료·집중·
+   반환율이 전부 빠지고, 지금 걸린 주문만 보면 된다. 전 도시 시세가 이미
+   저장소에 있으므로 계산은 로컬에서 끝난다 — 네트워크 요청이 없다.
+   급등을 잡는 게 목적이라 현재가를 평균으로 눌러 보정하지 않는다. */
+let flipOpen = false, flipRows = null, flipInfo = '', flipSort = 'profit';
+
+function runFlip(){
+  const cities = CITIES.map(c => c[0]);
+  const rows = [];
+  let absurd = 0, noPair = 0;
+  for(const r of ITEMS){
+    for(const q of QUALITIES){
+      // 사는 곳 — 판매 주문 최저가(즉시 구매)가 가장 싼 도시
+      let buy = null;
+      for(const c of cities){
+        const p = rawPriceAt(r.id, c, q);
+        if(!p || !p.s) continue;
+        if(!buy || p.s < buy.v) buy = { city: c, v: p.s, date: p.sd };
+      }
+      if(!buy){ noPair++; continue; }
+      // 파는 곳 — 세후 실수령이 가장 큰 (도시 × 방식). 암시장은 장비류만
+      let sell = null;
+      const take = (c, mode, v, date) => {
+        if(!v) return;
+        const net = netOf(v, mode);
+        if(!sell || net > sell.net) sell = { city: c, mode, v, net, date };
+      };
+      for(const c of [...cities, BLACK_MARKET]){
+        if(c === BLACK_MARKET && !BM_SELLS(r)) continue;
+        const p = rawPriceAt(r.id, c, q);
+        if(!p) continue;
+        take(c, 'instant', p.b, p.bd);
+        // 산 도시에 되걸기는 의미가 없다 (같은 주문서에 다시 올리는 셈)
+        if(c !== buy.city) take(c, 'order', p.s, p.sd);
+      }
+      if(!sell){ noPair++; continue; }
+      const profit = sell.net - buy.v;
+      if(profit <= 0) continue;
+      // 양쪽 다 이상 호가는 걸러낸다
+      const hs = hist7(r.id, sell.city, q), hb = hist7(r.id, buy.city, q);
+      if(hs && isFinite(hs.avg) && hs.avg > 0 && sell.v / hs.avg - 1 > ABSURD_DEV){ absurd++; continue; }
+      if(hb && isFinite(hb.avg) && hb.avg > 0 && buy.v < hb.avg / ABSURD_DEV){ absurd++; continue; }
+      rows.push({
+        id: r.id, rec: r, q, buy, sell, profit,
+        margin: profit / buy.v,
+        same: buy.city === sell.city,
+        dev: hs && isFinite(hs.avg) && hs.avg ? sell.v / hs.avg - 1 : null,
+        vol: hs && isFinite(hs.vol) ? hs.vol : NaN,
+        cv:  hs && isFinite(hs.cv)  ? hs.cv  : NaN,
+        trend: hs && isFinite(hs.trend) ? hs.trend : NaN,
+      });
+    }
+  }
+  const pos = rows.filter(x =>
+    (!cfg.minProfit || x.profit >= cfg.minProfit) &&
+    (!cfg.minVol || (isFinite(x.vol) && x.vol >= cfg.minVol)));
+  flipRows = pos;
+  flipInfo = `${fmt(rows.length)}건 중 ${fmt(pos.length)}건` +
+             (absurd ? ` · 이상 호가 ${fmt(absurd)}건 제외` : '') +
+             ` · 시세 짝이 없어 제외 ${fmt(noPair)}건` +
+             (prices.size ? ` · 저장된 시세 ${fmt(prices.size)}행` : '');
+  flipOpen = true; scanOpen = false; circuitOpen = false; ledgerOpen = false;
+  renderFlip();
+}
+
+function flipSorted(){
+  const rows = [...(flipRows || [])];
+  const num = v => isFinite(v) ? v : -Infinity;
+  if(flipSort === 'margin') rows.sort((a, b) => b.margin - a.margin);
+  else if(flipSort === 'vol')   rows.sort((a, b) => num(b.vol) - num(a.vol));
+  else if(flipSort === 'trend') rows.sort((a, b) => num(b.trend) - num(a.trend));
+  else if(flipSort === 'spike') rows.sort((a, b) => num(b.dev) - num(a.dev));
+  else if(flipSort === 'safe'){
+    const sc = x => {
+      if(!isFinite(x.vol) || x.vol <= 0) return -Infinity;
+      if(x.dev !== null && Math.abs(x.dev) > 1) return -Infinity;
+      let v = Math.min(x.vol, 500) / 500 * 40;
+      if(isFinite(x.cv)) v += Math.max(0, 1 - x.cv / 0.3) * 40;
+      if(x.dev !== null) v += Math.max(0, 1 - Math.abs(x.dev) / 0.3) * 20;
+      return v;
+    };
+    rows.sort((a, b) => (sc(b) - sc(a)) || (b.profit - a.profit));
+  }
+  else rows.sort((a, b) => b.profit - a.profit);
+  return rows;
+}
+
 /* ══ 정제 순회 ══════════════════════════════════════════════════
    왕국 도시 다섯 곳은 각각 하나의 정제 특화(+40%)를 갖는다. 그래서 정제는
    '어디서 만들까' 가 아니라 '이 도시에서 뭘 만들까' 의 문제가 된다.
@@ -2003,7 +2092,9 @@ function renderScan(){
           <div class="tw"><div class="nm">${esc(nameOf(x.id))}</div>
             <div class="id">${tierLabel(x.rec)} · ${esc(x.id)}</div></div>
         </div></td>
-        <td>${x.q > 1 ? `<span class="tag q${x.q}">${QUALITY_KO[x.q]}</span>`
+        <td>${x.q > 1 ? `<span class="tag q${x.q}">${QUALITY_KO[x.q]}</span>` +
+                        (x.q >= 4 ? `<div class="stale" style="font-size:10px"
+                          title="제작 품질은 확률로 갈립니다. 훌륭함·걸작을 골라서 만들 수는 없으니 이 값은 참고로만 보세요">골라 만들 수 없음</div>` : '')
                       : `<span class="mut">일반</span>`}</td>
         <td style="text-align:left">${x.mats.map(m => `
           <div class="mat" style="gap:5px;margin:1px 0">
@@ -2079,6 +2170,9 @@ function renderScan(){
     <span class="up">▲</span> 면 오르는 중이라 지금 만들 만하고,
     <span class="dn">▼</span> 면 완성될 즈음 더 떨어져 있을 수 있습니다.
     마지막 체결이 3일 이상 지났으면 며칠 전인지 함께 표시하고 색을 죽입니다.<br>
+    <b>훌륭함·걸작</b> 행에는 '골라 만들 수 없음' 이 붙습니다. 제작 품질은 확률로 갈려서
+    원하는 품질만 뽑아 만들 수 없으니, 그 이익률을 계획의 근거로 쓰면 실제보다 좋게 보입니다.
+    대개 일반~뛰어남 사이에서 팔게 됩니다.<br>
     <b>품질</b>은 걸러내지 않고 시세가 있는 품질을 모두 따로 계산해 보여줍니다 —
     같은 아이템이 품질별로 여러 줄 나올 수 있습니다. 원가는 품질과 무관하고
     (재료에는 품질이 없습니다) 판매가·거래량·피크가만 갈립니다.
@@ -2517,8 +2611,89 @@ function journeyStops(){
            net: sp.net * qty, profit: (sp.net - u.cost) * qty, fee: u.fee * qty };
 }
 
+/* ══ 플립핑 화면 ════════════════════════════════════════════════ */
+function renderFlip(){
+  const main = document.getElementById('main');
+  const rows = flipSorted().slice(0, SCAN_CAP);
+  const sorts = [['profit','이익순'],['margin','이익률순'],['spike','급등순'],
+                 ['trend','상승세순'],['vol','거래량순'],['safe','안정성순']];
+  main.innerHTML = `
+  <div class="head" style="gap:10px">
+    <div style="flex:1;min-width:0">
+      <h2 style="font-size:16px">플립핑</h2>
+      <div class="en">만들지 않고 싸게 사서 비싸게 파는 것만 — 저장된 시세로 계산해 조회가 없습니다</div>
+      <div class="en">${esc(flipInfo)}</div>
+    </div>
+    <button class="btn" data-flipback="1">아이템 계산으로</button>
+    <button class="btn pri" data-fliprun="1">다시 계산</button>
+  </div>
+  <div class="cfg" style="padding:9px 12px;margin-bottom:10px">
+    <h3 style="margin-bottom:7px">걸러내기</h3>
+    <div class="cfgrid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">
+      <div class="field"><label>최소 일 거래량</label>
+        <input type="number" data-cfg="minVol" value="${cfg.minVol}" min="0" step="10"></div>
+      <div class="field"><label>최소 개당 이익</label>
+        <input type="number" data-cfg="minProfit" value="${cfg.minProfit}" min="0" step="1000"></div>
+    </div>
+    <div class="status" style="margin-top:7px">값을 바꾸면 <b>다시 계산</b> 을 눌러주세요.
+      프리미엄 ${cfg.premium ? '켬 (판매세 4%)' : '끔 (판매세 8%)'} 기준입니다.</div>
+  </div>
+  ${rows.length ? `<div style="display:flex;gap:6px;margin-bottom:8px;align-items:center">
+    <span class="mut" style="font-size:11px">정렬</span>
+    ${sorts.map(([v,k]) => `<button class="mini ${flipSort===v?'on':''}"
+      data-flipsort="${v}">${k}</button>`).join('')}
+  </div>
+  <div style="overflow-x:auto"><table>
+    <thead><tr><th>아이템</th><th>품질</th><th>사는 곳</th><th>파는 곳</th>
+      <th>개당 이익</th><th>이익률</th><th>7일 평균比</th><th>최근 추세</th>
+      <th>일 거래량</th><th>변동</th></tr></thead>
+    <tbody>${rows.map(x => `
+      <tr data-pick="${esc(x.id)}" data-q="${x.q}" style="cursor:pointer">
+        <td><div class="mat"><img data-icon="${esc(x.id)}" data-sz="48" alt="">
+          <div class="tw"><div class="nm">${esc(nameOf(x.id))}</div>
+          <div class="id">${tierLabel(x.rec)} · ${esc(x.id)}</div></div></div></td>
+        <td>${x.q > 1 ? `<span class="tag q${x.q}">${QUALITY_KO[x.q]}</span>`
+                      : '<span class="mut">일반</span>'}</td>
+        <td style="text-align:left"><b>${esc(CITY_KO[x.buy.city])}</b>
+          <div class="mut" style="font-size:10px">즉시 구매 ${fmt(x.buy.v)}</div></td>
+        <td style="text-align:left"><b class="${x.same ? '' : 'alt2'}">${esc(CITY_KO[x.sell.city])}</b>
+          <div class="mut" style="font-size:10px">${
+            x.sell.mode === 'order' ? '판매 주문' : '즉시 판매'} ${fmt(x.sell.v)}</div>
+          ${x.same ? '<div class="up" style="font-size:10px">같은 도시</div>' : ''}</td>
+        <td class="up">+${fmt(x.profit)}</td>
+        <td class="up">${pct(x.margin)}</td>
+        <td>${x.dev === null ? '<span class="mut">—</span>'
+          : `<span class="${x.dev > 0.3 ? 'stale' : 'mut'}">${x.dev > 0 ? '+' : ''}${
+              (x.dev*100).toFixed(0)}%</span>`}</td>
+        <td>${isFinite(x.trend)
+          ? (Math.abs(x.trend) < 0.03 ? '<span class="mut" style="font-size:10px">보합</span>'
+             : `<span class="${x.trend > 0 ? 'up' : 'dn'}" style="font-size:10px">${
+                 x.trend > 0 ? '▲ +' : '▼ '}${(x.trend*100).toFixed(0)}%</span>`)
+          : '<span class="mut">—</span>'}</td>
+        <td class="${isFinite(x.vol) && x.vol >= 20 ? 'mut' : 'stale'}">${
+          isFinite(x.vol) ? fmt(x.vol) : '—'}</td>
+        <td>${isFinite(x.cv)
+          ? `<span class="${x.cv < 0.1 ? 'up' : x.cv < 0.3 ? 'mut' : 'stale'}">${
+              (x.cv*100).toFixed(0)}%</span>` : '<span class="mut">—</span>'}</td>
+      </tr>`).join('')}</tbody></table></div>
+  <div class="note">
+    제작이 없으니 사용료·집중·반환율이 들어가지 않습니다. <b>사는 곳</b> 은 판매 주문
+    최저가(즉시 구매)가 가장 싼 도시, <b>파는 곳</b> 은 세금 뺀 실수령이 가장 큰
+    (도시 × 방식) 조합입니다. 산 도시에 되걸기는 제외했습니다.<br>
+    <b>같은 도시</b> 표시가 붙으면 이동 없이 그 자리에서 사서 팔 수 있습니다 —
+    주문서 양쪽 스프레드만 먹는 것이라 가장 빠릅니다.<br>
+    <b>급등순</b> 으로 정렬하면 지금 값이 7일 평균에서 가장 많이 올라간 것부터 나옵니다 —
+    오늘 튄 물건을 잡는 용도입니다. 반대로 <b>안정성순</b> 은 평균에서 100% 넘게
+    벗어난 것을 제외하고 거래량·변동이 좋은 것부터 보여줍니다.<br>
+    시세는 저장소에 담긴 값입니다. 오래됐으면 왼쪽에서 <b>전체 수집</b> 을 다시 돌리세요.
+  </div>` : `<div class="empty">조건에 맞는 플립핑 후보가 없습니다.<br>
+    <span class="mut">왼쪽 <b>전체 수집</b> 으로 시세를 먼저 채우면 후보가 크게 늘어납니다.</span></div>`}`;
+  hydrateIcons(main);
+}
+
 /* ══ 메인 ═══════════════════════════════════════════════════════ */
 function render(){
+  if(flipOpen) return renderFlip();
   if(ledgerOpen) return renderLedger();
   if(circuitOpen) return renderCircuit();
   if(scanOpen) return renderScan();
@@ -2916,7 +3091,7 @@ document.addEventListener('click', e => {
   if(pick && !b){
     sel = pick.dataset.pick; localStorage.setItem('ao_sel', sel);
     if(pick.dataset.q){ cfg.quality = +pick.dataset.q; saveCfg(); }
-    scanOpen = false; circuitOpen = false; ledgerOpen = false; recipePick.clear();
+    scanOpen = false; circuitOpen = false; ledgerOpen = false; flipOpen = false; recipePick.clear();
     document.getElementById('main').scrollTop = 0;
     render(); fetchPrices(); return;
   }
@@ -2924,6 +3099,7 @@ document.addEventListener('click', e => {
   const row = e.target.closest('.row');
   if(row){ sel = row.dataset.id; localStorage.setItem('ao_sel', sel);
            recipePick.clear(); scanOpen = false; circuitOpen = false; ledgerOpen = false;
+           flipOpen = false;
            document.getElementById('main').scrollTop = 0;
            render(); fetchPrices(); return; }
   if(!b) return;
@@ -3074,13 +3250,16 @@ document.addEventListener('click', e => {
     LEDGER.crafts = []; LEDGER.sales = []; saveLedger();
     ledgerMsg = '장부를 비웠습니다.'; renderLedger(); return;
   }
-  if(b.dataset.circuitrun !== undefined){ scanOpen = false; runCircuit(); return; }
+  if(b.dataset.circuitrun !== undefined){ scanOpen = false; flipOpen = false; runCircuit(); return; }
   if(b.dataset.circuitback !== undefined){ circuitOpen = false; render(); fetchPrices(); return; }
   if(b.dataset.circuitopen !== undefined){ circuitOpen = true; renderCircuit(); return; }
   if(b.dataset.chain !== undefined){
     cfg.chainDepth = b.dataset.chain === 'best' ? 'best' : +b.dataset.chain;
     saveCfg(); runCircuit(); return;
   }
+  if(b.dataset.fliprun !== undefined){ runFlip(); return; }
+  if(b.dataset.flipback !== undefined){ flipOpen = false; render(); fetchPrices(); return; }
+  if(b.dataset.flipsort !== undefined){ flipSort = b.dataset.flipsort; renderFlip(); return; }
   if(b.dataset.full !== undefined){ runFullScan(b.dataset.full === '2'); return; }
   if(b.dataset.fullstop !== undefined){ fullStop = true; fullNote = '중단 요청…'; renderStore(); return; }
   if(b.dataset.fullclear !== undefined){
@@ -3088,7 +3267,7 @@ document.addEventListener('click', e => {
     fullNote = ''; dbNote = '저장된 시세 없음'; renderStore(); return;
   }
   if(b.dataset.todorun !== undefined){ circuitOpen = false; runTodo(); return; }
-  if(b.dataset.scanrun !== undefined){ circuitOpen = false; runScan(); return; }
+  if(b.dataset.scanrun !== undefined){ circuitOpen = false; flipOpen = false; runScan(); return; }
   if(b.dataset.scanback !== undefined){   // 탐색 화면 → 아이템 계산
     scanOpen = false; render(); fetchPrices(); return;
   }

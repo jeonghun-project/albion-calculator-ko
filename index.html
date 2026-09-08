@@ -763,6 +763,17 @@ async function fetchHistory(ids, cities, qualities){
           days: rows.length,
           trend: (near && far && far.avg) ? near.avg / far.avg - 1 : NaN,
           last,
+          // 일별 체결가가 얼마나 흔들리는지 (변동계수) — 낮을수록 값이 안정적이다
+          cv: (() => {
+            const xs = solid.slice(-14).map(r => r.avg_price);
+            if(xs.length < 4) return NaN;
+            const m = xs.reduce((a, b) => a + b, 0) / xs.length;
+            if(!m) return NaN;
+            const v = xs.reduce((a, b) => a + (b - m) ** 2, 0) / xs.length;
+            return Math.sqrt(v) / m;
+          })(),
+          // 거래가 있었던 날 비율 — 매일 도는 물건인지, 띄엄띄엄인지
+          days_active: all.length ? solid.length / all.length : NaN,
           peak: peak ? peak.avg_price : NaN,
           peakDate: peak ? peak.timestamp : null,
           medVol: med,
@@ -830,6 +841,9 @@ const setStatus = t => document.getElementById('status').textContent = t;
    지금 설정(도시·집중·판매처·품질·세금)을 그대로 적용해, 목록 조건에
    걸리는 아이템을 한꺼번에 계산하고 이익이 나는 것만 추려 보여준다. */
 let dailyOpen = false, scanTodo = false;
+/* 추이를 받아볼 후보 수. 임계값을 쓰면 이익 나는 것 전부를 봐야
+   '안정적이지만 이익이 중간' 인 것이 걸러지지 않는다. */
+const SCAN_HEAD = 200, SCAN_HEAD_MAX = 1200, SCAN_CAP = 200;
 let scanBusy = false, scanRows = null, scanInfo = '', scanHint = '';
 /* 탐색 결과는 아이템 상세로 넘어가도 버리지 않고, scanOpen 으로 화면만 오간다 */
 let scanOpen = false;
@@ -859,13 +873,25 @@ function scanSorted(){
     rows.sort((a,b) => tr(b) - tr(a));
   }
   else if(scanSort === 'safe'){
-    // 거래량이 있고 현재가가 평균에서 덜 벗어난 것부터 — 튄 주문에 속지 않도록
+    /* 안정성 = 흔들리지 않고 꾸준히 팔리는가.
+       ① 일별 체결가 변동계수가 낮다  ② 거래가 매일 있다  ③ 거래량이 많다
+       ④ 지금 값이 7일 평균에서 안 벗어났다  ⑤ 데이터가 최신이다
+       를 점수로 합치고, 같은 점수면 이익 큰 것을 앞세운다. */
     const score = x => {
+      const g = h(x);
+      if(!g) return -Infinity;
       const d = dev(x), v = vol(x);
-      if(d === null || v < 0) return -Infinity;
-      return v * 1000 - Math.abs(d) * 1e6;
+      if(d === null || v <= 0) return -Infinity;
+      let sc = 0;
+      sc += Math.min(v, 500) / 500 * 30;                                  // 거래량
+      if(isFinite(g.cv))          sc += Math.max(0, 1 - g.cv / 0.3) * 30;  // 가격 안정
+      if(isFinite(g.days_active))  sc += g.days_active * 20;               // 거래 지속성
+      sc += Math.max(0, 1 - Math.abs(d) / 0.3) * 15;                       // 평균 대비 이탈
+      const age = g.last ? staleH(g.last) / 24 : 99;
+      sc += Math.max(0, 1 - age / 5) * 5;                                  // 최신성
+      return sc;
     };
-    rows.sort((a,b) => score(b) - score(a));
+    rows.sort((a,b) => (score(b) - score(a)) || (b.profit - a.profit));
   }
   else rows.sort((a,b) => b.profit - a.profit);
   return rows;
@@ -980,7 +1006,11 @@ async function runScan(){
     rows.sort((a, b) => b.profit - a.profit);
     let pos = rows.filter(x => x.profit > 0 && x.profit >= (cfg.minProfit || 0));
     // 거래량·평균比 판정에 필요한 추이는 상위권만 받는다 (요청 2건 이내)
-    const head = pos.slice(0, 150);
+    // 이익순 상위만 골라 거래량을 조회하면, 안정적이지만 이익이 중간인 것들이
+    // 후보에 못 들어온다. 임계값을 쓸 때는 이익 나는 것 전부의 추이를 받는다.
+    // 추이 조회는 URL 한도까지 묶이므로 도시별 1~2건이면 끝난다.
+    const wantAll = (cfg.minVol > 0 || cfg.maxDev > 0);
+    const head = pos.slice(0, wantAll ? SCAN_HEAD_MAX : SCAN_HEAD);
     if(head.length){
       // 도시별로 묶고 필요한 품질은 한 요청에 함께 보낸다 (도시×품질로 쪼개면 요청이 몇 배가 된다)
       const byCity = new Map();
@@ -1003,13 +1033,15 @@ async function runScan(){
       }
       return true;
     });
-    const win = kept.slice(0, 60);
+    const win = kept.slice(0, SCAN_CAP);
     scanRows = win;
     const shown = new Set(win.map(x => x.id)).size;
     scanInfo = `후보 ${fmt(cands.length)}종 → ${fmt(shown)}종 ${fmt(win.length)}행` +
+               ` · 이익 ${fmt(pos.length)}행 중 ${fmt(head.length)}행 검토` +
                ` · 적자 ${fmt(rows.length - pos.length)}행` +
                (cut ? ` · 임계값 미달 ${fmt(cut)}행` : '') +
-               ` · 시세 없음 ${fmt(noSell)}종 제외`;
+               ` · 시세 없음 ${fmt(noSell)}종 제외` +
+               (kept.length > SCAN_CAP ? ` · 상위 ${fmt(SCAN_CAP)}행만 표시` : '');
     // 판매처·판매방식 때문에 대량으로 빠졌으면 어떻게 살리는지 알려준다
     scanHint = rescuable >= 5
       ? `판매 시세가 없어 빠진 ${fmt(noSell)}종 중 <b>${fmt(rescuable)}종</b>은 다른 판매처나 판매 방식에서는 값이 있습니다.` +
@@ -1737,7 +1769,7 @@ function renderScan(){
       <th>아이템</th><th>품질</th><th>재료 (1개당 실소모)</th><th>재료비</th><th>수수료</th>
       <th>개당 원가</th><th>판매처</th><th>판매가</th><th>7일 평균</th><th>최근 추세</th>
       <th>개당 이익</th><th>이익률</th>${cfg.focus ? '<th>집중당</th>' : ''}
-      <th>경유</th><th>일 거래량</th><th>권장 수량</th><th>28일 피크가</th>
+      <th>경유</th><th>일 거래량</th><th>안정성</th><th>권장 수량</th><th>28일 피크가</th>
     </tr></thead>
     <tbody>
     ${scanSorted().map(x => {
@@ -1781,6 +1813,17 @@ function renderScan(){
           <div class="mut" style="font-size:10px">${
             (x.cities || []).map(c => esc(CITY_KO[c] || c)).join(' → ')}</div></td>
         <td class="${thin ? 'stale' : 'mut'}">${h && isFinite(h.vol) ? fmt(h.vol) : '—'}</td>
+        <td>${(() => {
+          if(!h) return '<span class="mut">—</span>';
+          const bits = [];
+          if(isFinite(h.cv))
+            bits.push(`<span class="${h.cv < 0.1 ? 'up' : h.cv < 0.3 ? 'mut' : 'stale'}">변동 ${
+              (h.cv * 100).toFixed(0)}%</span>`);
+          if(isFinite(h.days_active))
+            bits.push(`<span class="${h.days_active > 0.8 ? 'up' : 'mut'}">거래일 ${
+              (h.days_active * 100).toFixed(0)}%</span>`);
+          return bits.length ? bits.join('<br>') : '<span class="mut">—</span>';
+        })()}</td>
         ${(() => {
           const q = suggestQty(h), pk = suggestPrice(h);
           const qCell = isFinite(q)
@@ -1825,7 +1868,13 @@ function renderScan(){
     초록으로 표시했습니다 — 한 도시에서 사서 만들고 바로 팔면 1곳이라 가장 빠릅니다.
     <b>빠른 순회순</b>으로 정렬하면 이동이 적은 것부터 보여줍니다. 이익이 조금 낮아도
     한 바퀴가 짧으면 시간당 수익은 더 나올 수 있습니다.<br>
-    <b>안정성순</b>은 거래량이 있으면서 평균에서 덜 벗어난 것부터 보여줍니다.
+    <b>안정성</b> · <b>변동</b> 은 최근 14일 체결가의 변동계수입니다 — 10% 미만이면 값이
+    거의 안 흔들린다는 뜻이고 30%를 넘으면 하루하루 크게 튑니다.
+    <b>거래일</b> 은 기록된 날 중 실제로 거래가 있었던 날 비율입니다 — 80% 넘으면
+    매일 도는 물건입니다. <b>안정성순</b> 은 거래량·가격 변동·거래 지속성·평균 대비 이탈·
+    데이터 최신성을 점수로 합쳐 정렬하고, 같은 점수면 이익 큰 것을 앞세웁니다.
+    최소 거래량이나 평균比 임계값을 넣으면 이익 나는 후보 <b>전부</b>의 추이를 받아
+    판정합니다 — 그래야 '안정적이지만 이익은 중간' 인 것이 걸러지지 않습니다.
     <b>집중당 이익순</b>은 집중을 쓸 때만 나오며, 하루 10,000 집중을 어디에
     쓸지 고르는 기준입니다 — 이익률이 높아도 집중을 많이 먹으면 손해입니다.<br>
     <b>판매처</b>가 파란색이면 자동 선택되거나 대체된 곳입니다. 세금·등록비를 뺀

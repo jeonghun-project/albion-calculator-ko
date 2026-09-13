@@ -160,6 +160,13 @@ for i in sorted(keep):
     rec = dict(items[i])
     if rec['k'] not in CRAFT_KINDS:
         rec.pop('r', None)           # 재료 전용 아이템의 레시피는 버림
+    # 장비 아티팩트(그리핀 깃털·저주받은 칼날 등)는 제작할 수 없다. 덤프에는 '유물 50개'
+    # 같은 레시피가 붙어 있지만 게임에서 쓸 수 없는 경로라, 남겨두면 계산기가 제작 가능하다고
+    # 거짓말을 한다(시장 297,368 짜리 깃털이 21,000 으로 찍혔다). 레시피를 떼고 nc 로 표시한다.
+    # 조각(룬·영혼·유물·샤드, s1=fragments)은 대상이 아니다.
+    if rec.get('sc') == 'artefacts' and rec.get('s1') != 'fragments' and rec.get('r'):
+        rec.pop('r')
+        rec['nc'] = 1
     for k in ('sc', 's1', 's2', 'cc', 'ko', 'en'):
         if rec.get(k) == '': rec.pop(k)
     for k in ('e', 't'):

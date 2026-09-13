@@ -290,11 +290,9 @@ const noReturn = (id, flag) => !!flag || id.includes('ARTEFACT') ||
                        id.includes('TOKEN') || id.startsWith('QUESTITEM') ||
                        /_(RUNE|SOUL|RELIC)$/.test(id);
 
-/* 아티팩트(그리핀 깃털 등)는 던전·시장에서 얻는 물건이지 만들어 쓰는 재료가 아니다.
-   게임 덤프에는 '유물 50개' 같은 레시피가 붙어 있지만 그대로 쓰면 원가가 무너진다 —
-   숙련자의 깔끔한 그리핀 깃털이 시장 297,368 인데 유물 50개면 21,000 이다. 실제로 그 값에
-   만들 수 있으면 아무도 깃털을 사지 않을 것이다. 그래서 자동·일괄 제작 대상에서 빼고,
-   굳이 켜면 경고를 붙인다. 개별 '제작' 버튼으로는 여전히 켤 수 있다. */
+/* 장비 아티팩트(그리핀 깃털 등)는 제작할 수 없다 — 빌드 단계에서 레시피를 떼고 nc 로 표시한다
+   (build_data.py). 여기 isArtefact 는 남은 조각(룬·영혼·유물·샤드)을 자동·일괄 제작에서
+   빼는 데 쓴다. */
 const isArtefact = id => (IX.get(id) || {}).sc === 'artefacts';
 
 /* ── 카테고리 탭 ──────────────────────────────────────────────── */
@@ -1707,7 +1705,7 @@ const FULL_FRESH_MS = 6 * 60 * 60 * 1000;   // 6시간 안에 받은 건 다시 
 async function runFullScan(withHistory){
   if(fullBusy){ fullStop = true; return; }
   fullBusy = true; fullStop = false; fullPct = 0;
-  const ids = ITEMS.filter(r => r.r).map(r => r.id);
+  const ids = ITEMS.filter(r => r.r || r.nc).map(r => r.id);
   const cities = PRICE_CITIES;
   const now = Date.now();
   const stale = k => { const t = priceAt.get(k); return !t || now - t > FULL_FRESH_MS; };
@@ -2007,16 +2005,8 @@ function priceCell(id, crafting, unitCostVal, auto){
       CRAFT_KIND_LABEL[k] || '직접제작'}</span> <span class="tag stale">시세 없어 제작</span>`;
     // 변환은 재료값보다 은화 수수료가 본체라 금액을 같이 적어 준다
     const silver = k === 'transmute' && r && r.s ? ` <span class="tag">은화 ${fmt(r.s / r.a)}</span>` : '';
-    // 아티팩트를 굳이 제작으로 켰다면, 사는 값과 얼마나 벌어지는지 알려 준다
-    let warn = '';
-    if(isArtefact(id)){
-      const mk = buyPrice(id).v;
-      warn = isFinite(mk) && mk > 0 && unitCostVal < mk * 0.5
-        ? ` <span class="tag nr">사면 ${fmt(mk)} — 정말 만들 수 있는지 확인</span>`
-        : ` <span class="tag nr">아티팩트</span>`;
-    }
     return `<span class="mut">${fmt(unitCostVal)}</span> <span class="tag craft">${
-      CRAFT_KIND_LABEL[k] || '직접제작'}</span>${silver}${warn}`;
+      CRAFT_KIND_LABEL[k] || '직접제작'}</span>${silver}`;
   }
   const bp = buyPrice(id);
   if(bp.src === 'manual')
@@ -3043,6 +3033,7 @@ function renderResult(){
               ? `<span class="tag stale" title="살 수 있는 시세가 없어 제작으로 계산합니다. 아래 '가격 직접 입력'에 값을 넣으면 구매로 바꿀 수 있습니다.">자동</span>`
               : `<button class="mini ${r.crafting?'on':''}" data-craft="${esc(r.id)}">${
               (CRAFT_KIND_BTN[r.kind] || '제작') + (r.crafting ? ' 중' : '')}</button>`)
+          : IX.get(r.id)?.nc ? '<span class="tag nr">제작 불가</span>'
           : '<span class="mut">—</span>'}</td>
       </tr>`;
     }).join('')}

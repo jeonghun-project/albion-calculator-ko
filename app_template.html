@@ -472,12 +472,14 @@ function rawPriceAt(id, city, q){
 const QUALITIES  = [1, 2, 3, 4, 5];
 const QUALITY_KO = { 1:'일반', 2:'좋음', 3:'뛰어남', 4:'훌륭함', 5:'걸작' };
 /** 값이 있는 도시 중 가장 싼(재료) / 가장 비싼(완제품) 곳을 찾는다 */
-function bestCity(id, q, field, cheapest){
+function bestCity(id, q, field, cheapest, sellMode){
   let best = null;
   for(const c of CITIES.map(x => x[0])){        // 암시장은 대체 대상에서 뺀다
-    const p = rawPrice(id, c, q) || (q !== 1 ? rawPrice(id, c, 1) : null);
+    const qp = rawPrice(id, c, q) ? q : 1;
+    const p = rawPrice(id, c, qp);
     const v = p && p[field];
     if(!v) continue;
+    if(sellMode && !sellSane(id, c, qp, v, sellMode)) continue;
     if(!best || (cheapest ? v < best.v : v > best.v)) best = { v, city: c, p };
   }
   return best;
@@ -514,6 +516,69 @@ function buyPrice(id){
   return { v: NaN, src: 'none' };
 }
 /** 완제품 판매가 — v 는 표시가, net 은 세후 실수령 */
+/* ── 판매가 검증 ────────────────────────────────────────────────
+   판매 주문 호가(sell_price_min)는 누군가 걸어둔 희망가일 뿐, 그 값에 팔렸다는 증거가 아니다.
+   거래가 없는 품질·도시엔 100만·500만짜리 호가가 그대로 최저가로 잡혀 원가 1,900 짜리
+   용병 후드가 100만에 팔린다고 나왔다. 이전 검사는 그 도시·품질에 7일 평균이 있을 때만
+   돌아서 '기록 없음' 이면 통과했고, 자동 판매처는 오히려 그 값을 골랐다.
+
+   근거로 삼는 건 실제로 돈이 오간 값뿐이다 — 7일 체결 평균과 구매 주문(은화가 묶인 입찰).
+   다른 도시의 호가는 근거가 아니다(희망가끼리는 서로를 증명하지 못한다).
+
+   판매 주문 호가의 상한 = 기준 체결가 × 2  (실거래의 두 배 넘는 호가는 걸어도 안 팔린다)
+     기준 체결가 = 같은 품질의 전 도시 체결 평균을 '일 거래량'으로 가중한 중앙값.
+       자기 도시 평균도 여기 한 표로 들어갈 뿐이다 — 하루 1.3건 팔린 카를레온 그레이브가드
+       부츠 평균 23,544 는, 하루 15~155건씩 2~7천에 팔리는 다른 도시들을 이기지 못한다.
+     같은 품질 기록이 없으면 모든 품질의 체결 평균으로 같은 계산을 한다.
+     어느 경우든 같은 품질 최고 입찰 × 2 보다 낮게 잡지는 않는다 (입찰은 실수요의 증거).
+     자기 도시가 하루 3건 이상·3일 이상 거래되면 자기 도시 평균 × 2 보다도 낮게 잡지 않는다.
+     근거가 하나도 없으면 호가는 검증할 수 없으니 버린다.
+   구매 주문(즉시 판매)은 실제 입찰이라, 자기 도시 체결 평균이 있을 때 명백한 오타만 거른다.
+
+   실측 — 걸리는 것: 용병 후드 걸작 1,000,000 · 암살자 신발 5,000,000 · 왕실 두건 걸작
+   899,976 · 왕실 로브 좋음 900,000 · 그레이브가드 부츠 149,994.
+   통과하는 것: 드래곤슬레이어 재킷 좋음 1,685,888 (다른 도시 좋음 평균 142만) ·
+   용병 후드 일반 2,869 (다른 도시 평균 2,010) · 왕실 두건 훌륭함 200,000 (평균 13만). */
+const SELL_CAP_X = 2;
+function wmedian(xs){
+  xs.sort((a, b) => a.v - b.v);
+  const tot = xs.reduce((a, x) => a + x.w, 0);
+  let acc = 0;
+  for(const x of xs){ acc += x.w; if(acc >= tot / 2) return x.v; }
+  return xs.length ? xs[xs.length - 1].v : NaN;
+}
+function sellCap(id, city, q){
+  const same = [], any = [];
+  let bid = 0;
+  for(const c of PRICE_CITIES){
+    for(const qq of QUALITIES){
+      const h = hist7(id, c, qq);
+      if(!h || !isFinite(h.avg) || h.avg <= 0) continue;
+      const e = { v: h.avg, w: isFinite(h.vol) && h.vol > 0 ? h.vol : 0.1 };
+      any.push(e);
+      if(qq === q) same.push(e);
+    }
+    const pp = prices.get(pkey(id, c, q));
+    if(pp && pp.b > bid) bid = pp.b;
+  }
+  const ref = same.length ? wmedian(same) : any.length ? wmedian(any) : NaN;
+  let cap = isFinite(ref) ? ref * SELL_CAP_X : 0;
+  if(bid) cap = Math.max(cap, bid * SELL_CAP_X);
+  const own = hist7(id, city, q);
+  // 자기 도시가 꾸준히 대량으로 거래되는 곳이면 그 도시 시세도 기준으로 인정한다.
+  // 카를레온 밤나무 원목은 다른 도시(108~139)보다 세 배 비싼 395 에 하루 1,641건씩 팔린다.
+  if(own && isFinite(own.avg) && own.avg > 0 && own.vol >= 3 && own.days >= 3)
+    cap = Math.max(cap, own.avg * SELL_CAP_X);
+  return { cap: cap || NaN, ref,
+           ownCap: own && isFinite(own.avg) && own.avg > 0 ? own.avg * (1 + ABSURD_DEV) : NaN };
+}
+/** 이 판매가를 믿어도 되는가 */
+function sellSane(id, city, q, v, mode){
+  const { cap, ownCap } = sellCap(id, city, q);
+  if(mode === 'instant') return !isFinite(ownCap) || v <= ownCap;
+  return isFinite(cap) && v <= cap;
+}
+
 function sellPrice(id, quality){
   const q = +(quality ?? cfg.quality);
   if(override.has('SELL:' + id)){
@@ -531,20 +596,29 @@ function sellPrice(id, quality){
   // 자동: 실수령이 가장 큰 (도시 × 판매방식) 을 고른다
   if(isAuto()){
     const opts = venueOptions(id, q);
-    if(!opts.length) return { v: NaN, net: NaN, src:'none' };
+    if(!opts.length){
+      const all = venueOptions(id, q, true);
+      const top = all.length ? all.reduce((a, b) => b.v > a.v ? b : a) : null;
+      return { v: NaN, net: NaN, src:'none', rejected: top && { v: top.v, city: top.city } };
+    }
     const best = opts.reduce((a, b) => b.net > a.net ? b : a);
     return { ...best, src: best.mode, auto: true };
   }
   const instant = cfg.sellMode === 'instant';
   const field = instant ? 'b' : 's', dfield = instant ? 'bd' : 'sd';
-  const p = rawPrice(id, cfg.sellCity, q) || rawPrice(id, cfg.sellCity, 1);
-  if(p && p[field])
-    return { v: p[field], net: netOf(p[field], cfg.sellMode), src: cfg.sellMode,
-             date: p[dfield], city: cfg.sellCity, mode: cfg.sellMode };
+  const qp = rawPrice(id, cfg.sellCity, q) ? q : 1;
+  const p = rawPrice(id, cfg.sellCity, qp);
+  let rejected = null;
+  if(p && p[field]){
+    if(sellSane(id, cfg.sellCity, qp, p[field], cfg.sellMode))
+      return { v: p[field], net: netOf(p[field], cfg.sellMode), src: cfg.sellMode,
+               date: p[dfield], city: cfg.sellCity, mode: cfg.sellMode };
+    rejected = { v: p[field], city: cfg.sellCity };
+  }
   // 암시장은 가격 성격이 달라 royal 도시로 대체하지 않는다
-  if(!cfg.crossCity || isBM(cfg.sellCity)) return { v: NaN, net: NaN, src:'none' };
-  const alt = bestCity(id, q, field, false);   // 가장 비싼 도시
-  if(!alt) return { v: NaN, net: NaN, src:'none' };
+  if(!cfg.crossCity || isBM(cfg.sellCity)) return { v: NaN, net: NaN, src:'none', rejected };
+  const alt = bestCity(id, q, field, false, cfg.sellMode);   // 가장 비싼 (믿을 만한) 도시
+  if(!alt) return { v: NaN, net: NaN, src:'none', rejected };
   return { v: alt.v, net: netOf(alt.v, cfg.sellMode), src: cfg.sellMode,
            date: alt.p[dfield], city: alt.city, mode: cfg.sellMode, alt: true };
 }
@@ -555,20 +629,21 @@ const setupFee = () => feeOf(cfg.sellMode);
 const netOf = (gross, mode) => gross * (1 - salesTax() - feeOf(mode));
 
 /** 팔 수 있는 모든 (도시 × 판매방식) 후보와 각각의 실수령 */
-function venueOptions(id, quality){
+function venueOptions(id, quality, unchecked){
   const rec = IX.get(id);
   const q = +(quality ?? cfg.quality);
   const out = [];
-  const add = (city, p) => {
+  const add = city => {
+    const qp = rawPrice(id, city, q) ? q : 1;
+    const p = rawPrice(id, city, qp);
     if(!p) return;
-    if(p.s) out.push({ city, mode:'order',   v:p.s, net:netOf(p.s,'order'),   date:p.sd });
-    if(p.b) out.push({ city, mode:'instant', v:p.b, net:netOf(p.b,'instant'), date:p.bd });
+    const ok = (v, mode) => unchecked || sellSane(id, city, qp, v, mode);
+    if(p.s && ok(p.s, 'order'))   out.push({ city, mode:'order',   v:p.s, net:netOf(p.s,'order'),   date:p.sd });
+    if(p.b && ok(p.b, 'instant')) out.push({ city, mode:'instant', v:p.b, net:netOf(p.b,'instant'), date:p.bd });
   };
-  for(const c of CITIES.map(x => x[0]))
-    add(c, rawPrice(id, c, q) || rawPrice(id, c, 1));
+  for(const c of CITIES.map(x => x[0])) add(c);
   // 암시장은 장비류만 거래된다
-  if(rec && BM_SELLS(rec))
-    add(BLACK_MARKET, rawPrice(id, BLACK_MARKET, q) || rawPrice(id, BLACK_MARKET, 1));
+  if(rec && BM_SELLS(rec)) add(BLACK_MARKET);
   return out;
 }
 
@@ -835,12 +910,22 @@ async function fetchPrices(forceFetch){
                 : `${ids.length}종 · ${got}건 · ${lastFetch.toLocaleTimeString('ko-KR')} 갱신`);
   document.getElementById('result') ? renderResult() : render();
 }
+/* 저장된 추이도 오래되면 다시 받는다. 예전엔 IndexedDB 에 한 번 들어간 추이를 영원히 썼다.
+   null(조회했지만 기록 없음)은 이번 세션 메모리에만 있으므로 그대로 믿는다. */
+const HIST_TTL_MS = 12 * 60 * 60 * 1000;
+function histFresh(k){
+  if(!hist.has(k)) return false;
+  const h = hist.get(k);
+  return h === null || (!!h.t && Date.now() - h.t < HIST_TTL_MS);
+}
 /** 7일 평균가와 일 거래량 — 현재가가 튄 값인지, 실제로 팔릴 물량인지 판단용 */
 async function fetchHistory(ids, cities, qualities){
   const want = [];
   for(const id of ids)
-    if(!cities.every(c => qualities.every(q => hist.has(pkey(id, c, q))))) want.push(id);
+    if(!cities.every(c => qualities.every(q => histFresh(pkey(id, c, q))))) want.push(id);
   if(!want.length) return;
+  const got = new Set();   // 이번에 새로 받은 키
+  let ok = false;
   const base = `https://${cfg.server}.albion-online-data.com/api/v2/stats/history/`;
   const qs = `?locations=${cities.map(encodeURIComponent).join(',')}` +
              `&qualities=${qualities.join(',')}&time-scale=24`;
@@ -871,6 +956,7 @@ async function fetchHistory(ids, cities, qualities){
         let peak = null;
         for(const r of solid) if(!peak || r.avg_price > peak.avg_price) peak = r;
         const hkey = pkey(e.item_id, e.location, e.quality);
+        got.add(hkey);
         hist.set(hkey, {
           avg: w ? w.avg : NaN,
           vol: rows.length ? (w ? w.cnt : 0) / rows.length : NaN,
@@ -898,12 +984,16 @@ async function fetchHistory(ids, cities, qualities){
       }
       dbPut('hist', hsave);
     }
+    ok = true;
   }catch(e){ /* 추이는 보조 정보 — 실패해도 계산은 그대로 */ }
-  // 응답이 없던 조합은 빈 값으로 채워 재요청을 막는다
+  // 응답이 없던 조합은 빈 값으로 채워 재요청을 막는다.
+  // 조회에 성공했는데 응답에 없던 오래된 값은 이제 기록이 없다는 뜻이므로 지운다.
   for(const id of want)
     for(const c of cities)
-      for(const q of qualities)
-        if(!hist.has(pkey(id, c, q))) hist.set(pkey(id, c, q), null);
+      for(const q of qualities){
+        const k = pkey(id, c, q);
+        if(!hist.has(k) || (ok && !got.has(k) && !histFresh(k))) hist.set(k, null);
+      }
 }
 const hist7 = (id, city, q = 1) => hist.get(pkey(id, city, q)) || null;
 
@@ -1091,6 +1181,7 @@ async function runScan(){
 
     const rows = [];
     let noSell = 0, rescuable = 0;   // 판매 시세가 없어 빠진 수 / 설정만 바꾸면 살아나는 수
+    let rejectedAsk = 0;             // 그중 검증 안 되는 호가만 있어 빠진 수
     for(const rec of cands){
       const r = recipeOf(rec.id);
       if(!r) continue;
@@ -1122,6 +1213,7 @@ async function runScan(){
       }
       if(!any){
         noSell++;
+        if(sellPrice(rec.id, 1).rejected) rejectedAsk++;
         if(!isAuto() && venueOptions(rec.id, 1).length) rescuable++;
       }
     }
@@ -1132,20 +1224,32 @@ async function runScan(){
     // 후보에 못 들어온다. 임계값을 쓸 때는 이익 나는 것 전부의 추이를 받는다.
     // 추이 조회는 URL 한도까지 묶이므로 도시별 1~2건이면 끝난다.
     const wantAll = (cfg.minVol > 0 || cfg.maxDev > 0);
-    const head = pos.slice(0, wantAll ? SCAN_HEAD_MAX : SCAN_HEAD);
+    let head = pos.slice(0, wantAll ? SCAN_HEAD_MAX : SCAN_HEAD);
+    let absurd = 0;
     if(head.length){
-      // 도시별로 묶고 필요한 품질은 한 요청에 함께 보낸다 (도시×품질로 쪼개면 요청이 몇 배가 된다)
-      const byCity = new Map();
+      // 판매가 검증의 근거는 체결 기록이다. 위에서 판매가를 고를 때는 메모리에 우연히 있던
+      // 추이 한두 건만 보고 판정했으므로(예전 세션이 저장한 카를레온 일반 20만 한 건 때문에
+      // 용기의 부츠 훌륭함 호가 577,777 이 통과했다), 상위 후보는 전 도시·전 품질 추이를
+      // 받은 뒤 판매가를 다시 고른다. 도시·품질을 한 요청에 묶으므로 요청 수는 늘지 않는다.
+      await fetchHistory([...new Set(head.map(x => x.id))], PRICE_CITIES, QUALITIES);
+      const again = [];
       for(const x of head){
-        const c = x.sp.city || cfg.sellCity;
-        if(!byCity.has(c)) byCity.set(c, { ids: new Set(), qs: new Set() });
-        byCity.get(c).ids.add(x.id);
-        byCity.get(c).qs.add(x.q || 1);
+        const sp = sellPrice(x.id, x.q);
+        if(!isFinite(sp.v) || !sp.v || (x.q !== 1 && !rawPriceAt(x.id, sp.city, x.q))){
+          absurd++; continue;
+        }
+        if(sp.v !== x.sell || sp.city !== x.sp.city || sp.mode !== x.sp.mode){
+          const profit = sp.net - x.cost;
+          Object.assign(x, { sell: sp.v, sp, profit, margin: profit / x.cost,
+                             perFocus: x.focus > 0 ? profit / x.focus : NaN,
+                             cities: routeCities(x.id, sp) });
+          if(!(profit > 0 && profit >= (cfg.minProfit || 0))){ absurd++; continue; }
+        }
+        again.push(x);
       }
-      for(const [c, v] of byCity)
-        await fetchHistory([...v.ids], [c], [...v.qs]);
+      head = again.sort((a, b) => b.profit - a.profit);
     }
-    let cut = 0, absurd = 0;
+    let cut = 0;
     const kept = head.filter(x => {
       // 7일 평균의 10배를 넘는 호가는 장난 주문이나 오타다 — 기회가 아니라 잘못된 데이터
       const hh = hist7(x.id, x.sp.city || cfg.sellCity, x.q || 1);
@@ -1169,6 +1273,7 @@ async function runScan(){
                (absurd ? ` · 이상 호가 ${fmt(absurd)}행 제외` : '') +
                (cut ? ` · 임계값 미달 ${fmt(cut)}행` : '') +
                ` · 시세 없음 ${fmt(noSell)}종 제외` +
+               (rejectedAsk ? `(그중 검증 안 되는 호가 ${fmt(rejectedAsk)}종)` : '') +
                (kept.length > SCAN_CAP ? ` · 상위 ${fmt(SCAN_CAP)}행만 표시` : '');
     // 판매처·판매방식 때문에 대량으로 빠졌으면 어떻게 살리는지 알려준다
     scanHint = rescuable >= 5
@@ -1208,7 +1313,7 @@ function flipFor(id, q = 1){
   if(!buy) return null;
   let sell = null;
   const take = (c, mode, v, date) => {
-    if(!v) return;
+    if(!v || !sellSane(id, c, q, v, mode)) return;
     const net = netOf(v, mode);
     if(!sell || net > sell.net) sell = { city: c, mode, v, net, date };
   };
@@ -2807,6 +2912,8 @@ function renderResult(){
       <div class="n">재료 + 수수료</div></div>
     <div class="card"><div class="k">개당 판매가</div>
       <div class="v">${noSell ? '<span class="stale">시세 없음</span>' : fmt(c.sellUnit)}</div>
+      ${noSell && c.sp.rejected ? `<div class="n"><span class="tag nr" title="거래 기록·다른 도시 시세로 검증되지 않는 호가라 쓰지 않았습니다. 믿을 수 있다면 아래 '가격 직접 입력'에 넣으세요.">이상 호가 제외 ${
+        fmt(c.sp.rejected.v)} · ${esc(CITY_KO[c.sp.rejected.city] || '')}</span></div>` : ''}
       <div class="n">${CITY_KO[c.sp.city || cfg.sellCity] || '—'}${
         c.sp.auto ? ' <span class="tag alt">자동</span>'
         : c.sp.alt ? ' <span class="tag alt">다른 도시</span>' : ''} · ${
